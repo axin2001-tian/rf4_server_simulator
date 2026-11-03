@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -438,9 +437,16 @@ func (s *Server) handlePlayerAvatarUpload(w http.ResponseWriter, r *http.Request
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
 	default:
-		ct := hdr.Header.Get("Content-Type")
-		ext = "." + strings.TrimPrefix(strings.ToLower(mime.TypeByExtension(ct)), "image/")
-		if ext == "." || ext == "."+mime.TypeByExtension(ct) || len(ext) < 3 || len(ext) > 6 {
+		switch strings.ToLower(hdr.Header.Get("Content-Type")) {
+		case "image/png":
+			ext = ".png"
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		default:
 			ext = ".png"
 		}
 	}
@@ -464,17 +470,39 @@ func (s *Server) handlePlayerAvatarUpload(w http.ResponseWriter, r *http.Request
 		httpError(w, 500, err.Error())
 		return
 	}
+	// 游戏客户端没有基准地址，必须存完整 URL 才能拉到图；
+	// 客户端与本机同机（gateway advertise 127.0.0.1），走 admin 端口托管。
+	url := rel
+	if base := s.publicBaseURL(); base != "" {
+		url = base + rel
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if _, err := s.db.SQL.ExecContext(ctx,
 		`UPDATE profile SET avatar=?, updated_ts=? WHERE uid=?`,
-		rel, float64(time.Now().Unix()), uid); err != nil {
+		url, float64(time.Now().Unix()), uid); err != nil {
 		httpError(w, 500, err.Error())
 		return
 	}
-	_ = s.db.AuditLogWrite(ctx, adminOf(r), "avatar_upload", strconv.FormatInt(uid, 10), rel)
+	_ = s.db.AuditLogWrite(ctx, adminOf(r), "avatar_upload", strconv.FormatInt(uid, 10), url)
 	_ = s.db.QueuePush(ctx, mustJSON(map[string]any{"op": "refresh_player", "uid": uid}))
-	writeJSON(w, map[string]any{"ok": true, "avatar": rel})
+	writeJSON(w, map[string]any{"ok": true, "avatar": url})
+}
+
+// publicBaseURL 由 admin 监听地址推导对外的 http://host:port 基址。
+func (s *Server) publicBaseURL() string {
+	addr := s.cfg.HTTPAddr
+	if addr == "" {
+		return ""
+	}
+	if i := strings.LastIndex(addr, ":"); i >= 0 && strings.Trim(addr[i+1:], "") != "" {
+		host := addr[:i]
+		if host == "" || host == "0.0.0.0" || host == "[::]" {
+			host = "127.0.0.1"
+		}
+		return "http://" + host + addr[i:]
+	}
+	return ""
 }
 
 // avatarDir 头像文件目录：与主库同级的 avatars/。
