@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,23 @@ type DB struct {
 	Path       string
 	StaticPath string
 	static     *staticState
+
+	// avatarColOnce/avatarColOK：profile.avatar 列惰性探测。历史库快照
+	// （如部分测试按旧迁移版本打开）没有该列，GetProfile 需要降级。
+	avatarColOnce sync.Once
+	avatarColOK   bool
+}
+
+// HasAvatarColumn 返回 profile 表是否已有 avatar 列（结果缓存）。
+func (d *DB) HasAvatarColumn() bool {
+	d.avatarColOnce.Do(func() {
+		var n int
+		if err := d.SQL.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('profile') WHERE name='avatar'`).Scan(&n); err == nil {
+			d.avatarColOK = n > 0
+		}
+	})
+	return d.avatarColOK
 }
 
 // Open 打开（必要时创建）主库并设置 WAL/忙等待。该入口不挂载 static，
@@ -95,6 +113,11 @@ func (d *DB) Migrate() error {
 			return err
 		}
 	}
+	// 迁移后补跑一次：全新库的 profile 表由 00001 创建，发生在前置补列之后，
+	// 需要在这里补上白名单里的新列（幂等）。
+	if err := d.ensureLegacyPlayerColumns(); err != nil {
+		return fmt.Errorf("迁移后补全玩家表列: %w", err)
+	}
 	if d.static != nil {
 		guardCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -123,6 +146,7 @@ func (d *DB) ensureLegacyPlayerColumns() error {
 		{"profile", "email", "TEXT DEFAULT ''"},
 		{"profile", "role", "INTEGER NOT NULL DEFAULT 0"},
 		{"profile", "banned", "INTEGER NOT NULL DEFAULT 0"},
+		{"profile", "avatar", "TEXT DEFAULT ''"},
 		{"item", "item_id", "TEXT"},
 		{"item", "numeric_id", "INTEGER"},
 		{"item", "wire_class", "TEXT"},

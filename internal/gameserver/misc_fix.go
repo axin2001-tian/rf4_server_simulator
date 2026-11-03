@@ -23,6 +23,7 @@ func init() {
 		d.Register(3, 21, hChangeRegion)
 		d.Register(3, 23, hVerifyEmail)
 		d.Register(24, 10, hSocialPublic)
+		d.Register(24, 1, hSocialMove)
 		d.Register(24, 2, hSocialCurrent)
 		d.Register(24, 3, hSocialCurrent)
 	})
@@ -357,6 +358,59 @@ func hSocialCurrent(ctx *Ctx) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	return body, true
+}
+
+// hSocialMove 处理 24/1 social/move：客户端把玩家移动到新的位置/聊天频道
+//（如挪威海按 E 上船后请求移动到 "nav12_02"），请求参数是目标频道名字符串。
+//
+// 必须回一个完整的频道对象 godhiicbgng（ancileefnje / 402），且 f0 与请求名
+// 完全一致；回兜底空 dto 客户端会判定移动失败，以约 16ms 间隔无限重发 24/1，
+// 玩家永远到不了船上（north_sea 上船黑屏的最后一环——23:41 实测：验票通过后
+// 24/1 刷屏 15 万条，而 komar 湖成功会话全程零条）。
+func hSocialMove(ctx *Ctx) ([]byte, bool) {
+	name := argFirstStr(ctx.Tree)
+	ch := sessChannel(ctx.Sess)
+	if name == "" {
+		name = ch.Name
+	}
+	// 记住会话当前频道：24/10 公聊回显、24/3 current 都要用它。
+	ctx.Sess.SetState("channel", map[string]any{
+		"name":    name,
+		"region":  ch.Region,
+		"users":   ch.Users,
+		"private": false,
+	})
+	srv := ctx.Sess.Srv
+	users := int64(0)
+	if srv != nil {
+		srv.mu.Lock()
+		for _, sess := range srv.sessions {
+			if sess != nil && !sess.Closed() {
+				users++
+			}
+		}
+		srv.mu.Unlock()
+	}
+	if users < 1 {
+		users = 1
+	}
+	obj := wiregen.MustMakeObj("godhiicbgng", map[int]*proto.Value{
+		0: proto.StrVal(name), // f0 必须与请求的目标频道名一致
+		1: proto.StrVal("公共频道"),
+		2: proto.StrVal(ch.Region),
+		3: proto.U32(uint32(users)),
+		4: proto.U32(0), // 0=Public
+		5: proto.Bool(false),
+		6: proto.Null(), // 成员列表懒加载
+		7: proto.U32(1),
+		8: proto.Bool(false),
+	})
+	body, err := proto.EncodeValue(obj, ctx.Sess.Table())
+	if err != nil {
+		return nil, false
+	}
+	ctx.Log.Info("24/1 social/move 切换频道", "channel", name)
 	return body, true
 }
 
