@@ -172,7 +172,7 @@ function renderPlayerDetail(){
   if(!PLAYER)return;
   const p=PLAYER;
   $('#playerDetail').innerHTML=`
-    <div class="player-hero"><div><h2>${esc(p.name)} <span class="muted">#${p.uid}</span></h2><div class="sub">Lv.${p.level} · XP ${fmt(p.xp)} · 背包/装备 ${p.item_count} · 护网 ${p.keepnet_count} · 邮件 ${p.mail_count}</div></div><div class="actions"><button class="btn alt sm" onclick="kickPlayer()">踢下线</button><button class="${p.banned?'btn good':'btn bad'} sm" onclick="toggleBan()">${p.banned?'解除封禁':'封禁玩家'}</button></div></div>
+    <div class="player-hero"><div><h2>${esc(p.name)} <span class="muted">#${p.uid}</span></h2><div class="sub">Lv.${p.level} · XP ${fmt(p.xp)} · 背包/装备 ${p.item_count} · 护网 ${p.keepnet_count} · 邮件 ${p.mail_count}</div></div><div class="actions"><button class="btn alt sm" onclick="kickPlayer()">踢下线</button><button class="${p.banned?'btn good':'btn bad'} sm" onclick="toggleBan()">${p.banned?'解除封禁':'封禁玩家'}</button><button class="btn alt sm" onclick="clearActiveTickets()">清除使用中船票</button></div></div>
     <div class="tabs"><button class="${PLAYER_TAB==='profile'?'on':''}" onclick="setPlayerTab('profile')">档案与资产</button><button class="${PLAYER_TAB==='items'?'on':''}" onclick="setPlayerTab('items')">背包 / 装备</button><button class="${PLAYER_TAB==='keepnet'?'on':''}" onclick="setPlayerTab('keepnet')">护网</button><button class="${PLAYER_TAB==='skills'?'on':''}" onclick="setPlayerTab('skills')">技能熟练度</button><button class="${PLAYER_TAB==='mail'?'on':''}" onclick="setPlayerTab('mail')">邮箱</button></div>
     <div id="playerTabBody"></div>`;
   renderPlayerTab();
@@ -221,6 +221,12 @@ function renderItems(){
 function renderItemRows(){
   const q=ITEM_FILTER.toLowerCase();const rows=(PLAYER.items||[]).filter(x=>!q||`${x.item_id} ${x.name} ${x.guid}`.toLowerCase().includes(q));
   $('#itemRows').innerHTML=rows.map(x=>`<tr><td><b>${esc(x.name||x.item_id)}</b><div class="muted mono">${esc(x.item_id)}</div></td><td>${x.category}</td><td>${esc(x.container)}</td><td>${x.qty}</td><td>${Number(x.durability).toFixed(4)}</td><td class="mono muted">${esc(x.guid.slice(0,12))}…</td><td class="right"><button class="btn bad sm" data-guid="${esc(x.guid)}" onclick="deletePlayerItem(this.dataset.guid)">删除</button></td></tr>`).join('')||'<tr><td colspan="7" class="empty">没有物品</td></tr>';
+}
+async function clearActiveTickets(){
+  if(!PLAYER)return;
+  if(!confirm('清除该玩家所有“使用中”的船票？背包内的船票实例将被移除，操作写入审计日志。'))return;
+  await api('/api/players/tickets/clear',{method:'POST',body:JSON.stringify({uid:PLAYER.uid})});
+  toast('清除指令已发送');await sleep(2300);await selectPlayer(PLAYER.uid);setPlayerTab('items');
 }
 async function deletePlayerItem(guid){
   if(!confirm('确定删除这件物品？操作会写入审计日志。'))return;

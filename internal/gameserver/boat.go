@@ -16,6 +16,8 @@ package gameserver
 //   - bkmnbppciao = mbplhipcojh 时效对象 {类型 1, 起始分钟, 时长分钟}
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"rf4server/internal/proto"
@@ -42,6 +44,50 @@ func init() { RegisterExtra(registerBoatHandlers) }
 // 单向通知，不需要回包），这里不重复注册，避免注册顺序漂移。
 func registerBoatHandlers(d *Dispatch) {
 	d.Register(3, 7, hCheckTicket)
+	d.Register(3, 18, hPlayerWarnings)
+	// main=3 族（player/*）全兜底处理器：客户端会发大量 player/* 命令，
+	// 我们不可能逐条注册；兜底器通过 fallbackFor 根据 command_contract.json
+	// 里的形状表（kind=none/null/args/dto）返回正确的空响应，避免客户端
+	// 因收到 null （0x00）而在内部抛 NullReferenceException 导致 BoatWatchDog
+	// 状态机崩溃（表现为上船黑屏 / 反复传回岸边）。
+	d.RegisterFamily(3, hFamilyFallbackPlayer)
+}
+
+// hFamilyFallbackPlayer main=3 族兜底：按合同表返回空形状。
+func hFamilyFallbackPlayer(ctx *Ctx) ([]byte, bool) {
+	srv := ctx.Sess.Srv
+	if srv == nil {
+		return []byte{0x00}, true
+	}
+	body, _ := srv.fallbackFor(ctx.Main, ctx.Sub)
+	if traceCmds {
+		ctx.Log.Info("3/" + fmt.Sprintf("%d", ctx.Sub) + " 兜底回包", "len", len(body))
+	}
+	return body, true
+}
+
+// hPlayerWarnings 处理 3/18 player/warnings。
+//
+// 客户端启动时会主动发这条命令查询"收到的游戏警告/提示"。它的处理链是
+// kdnajnloahj.iblhidcfike → bdjblkfkjfc[T]，内部把响应强转
+// System.Collections.IEnumerable 再遍历——期望的是"警告对象数组"。
+//
+// 回单个 lcjmijeeebm 对象会抛 InvalidCastException（Player.log 实测：
+// "Unable to cast object of type 'lcjmijeeebm' to type 'IEnumerable'"），
+// kdnajnloahj 状态机崩溃后，BoatWatchDog 的后续逻辑连带失败，表现为
+// 上船黑屏 / 反复弹"买船票"提示；回 null 则抛 NullReferenceException，
+// 效果相同。
+//
+// 因此返回空的开放式值列表（type_id 哨兵 98765）：客户端强转 IEnumerable
+// 成功、遍历不到任何元素，既不崩也不需要编造警告内容。
+func hPlayerWarnings(ctx *Ctx) ([]byte, bool) {
+	body, err := proto.EncodeValue(&proto.Value{Kind: proto.KindValList}, wiregen.Table())
+	if err != nil {
+		ctx.Log.Warn("3/18 编码空警告数组失败", "err", err)
+		return []byte{0x00}, true
+	}
+	ctx.Log.Info("3/18 player/warnings（返回空数组）", "len", len(body))
+	return body, true
 }
 
 // hCheckTicket 处理 3/7：请求参数为 [站点枚举, 船票 GUID]。
@@ -73,7 +119,10 @@ func hCheckTicket(ctx *Ctx) ([]byte, bool) {
 	if len(realGUIDs) == 0 {
 		// 不带 GUID 表示"这个码头现在能用哪张票"。
 		// 若已有仍在有效期内的激活票，直接复用它——否则玩家每次上船都会被
-		// 追问一次票。没有激活票时才回 null，让客户端弹选票框。
+		// 追问一次票。没有激活票时才回 null，让客户端弹选票框，由玩家手动
+		// 选票后客户端再发 [站点, 票 GUID] 走下方验票分支。
+		// （实测 2026-11-03：null-guid 时若自动选票激活并回票对象，客户端
+		// 看门狗不认账，会以约 17ms 间隔死循环重发 3/7，表现为按 E 即黑屏。）
 		if tree := srv.activeRentalTicket(ctx, station); tree != nil {
 			body, err := proto.EncodeValue(tree, ctx.Sess.Table())
 			if err == nil {
@@ -106,7 +155,9 @@ func hCheckTicket(ctx *Ctx) ([]byte, bool) {
 			}
 		}
 		// 选中票即开始租用：写入 knpoijanngk / 租期 / 时效对象并落库。
-		if srv.startTicketRent(ctx, row, def) {
+		// 注意：只在状态真正变化时才补推 remove+add（见下方 push 处说明）。
+		rented := srv.startTicketRent(ctx, row, def)
+		if rented {
 			ctx.Log.Info("3/7 船票开始租用", "guid", guidShort(g), "item", row.ItemID)
 		}
 		tree, terr := srv.ItemToTree(cctx, row)
@@ -119,55 +170,34 @@ func hCheckTicket(ctx *Ctx) ([]byte, bool) {
 			ctx.Log.Warn("3/7 编码失败", "guid", guidShort(g), "err", berr)
 			continue
 		}
+		// [调试] 打印票对象完整字段，定位客户端 _activateTicket 失败的原因。
+		// 只在第一次租用时打印一次，避免循环刷屏。
+		if rented {
+			var dbg string
+			for i, f := range tree.Fields {
+				label := fmtField(f)
+				if dbg != "" {
+					dbg += " | "
+				}
+				dbg += fmt.Sprintf("%d:%s=%s", i, fieldNameByIdx(row.WireClass, i), label)
+			}
+			ctx.Log.Info("3/7 票对象字段 dump", "guid", guidShort(g), "item", row.ItemID, "fields", dbg)
+		}
 		// 客户端构造租用记录读的是本地票对象，必须在回包前把"租用中"推给它，
 		// 否则它用旧的（未租用）票构造记录，看门狗判定失败并传回岸边。
-		ctx.Sess.Push(4, 21, proto.Args524(proto.GuidArr([]string{row.GUID})))
-		ctx.Sess.Push(4, 22, proto.Args(proto.S("61"), tree))
+		// 但只在租用状态发生变化时才推：看门狗验票失败会以极短间隔反复重发
+		// 3/7，若每次都推 4/21（移除）+4/22（重加），会把客户端刚构造好的
+		// 租用记录连带票对象一起打掉，造成无限验票循环（表现为上船黑屏）。
+		if rented {
+			ctx.Sess.Push(4, 21, proto.Args524(proto.GuidArr([]string{row.GUID})))
+			ctx.Sess.Push(4, 22, proto.Args(proto.S("61"), tree))
+		}
 		ctx.Log.Info("3/7 验票通过", "guid", guidShort(g), "item", row.ItemID, "station", station)
 		return body, true
 	}
 
 	ctx.Log.Info("3/7 没有可用船票，回 null", "station", station, "guids", len(realGUIDs))
 	return []byte{0x00}, true
-}
-
-// pickStationTicket 按站点在背包里挑一张未租用的船票（不写租用状态）。
-func (s *Server) pickStationTicket(ctx *Ctx, station uint64) *proto.Value {
-	cctx := ctx.Sess.pushCtx()
-	guids, err := s.DB.ItemGUIDsByContainers(cctx, ctx.Sess.Userid, []string{"backpack"})
-	if err != nil {
-		ctx.Log.Warn("3/7 按站点选票：读背包失败", "err", err)
-		return nil
-	}
-	for _, g := range guids {
-		row, rerr := s.DB.GetItemByGUID(cctx, g)
-		if rerr != nil || row == nil || row.UID != ctx.Sess.Userid || row.TypeID != boatTicketTypeID {
-			continue
-		}
-		def, derr := s.DB.GetItemDef(cctx, row.NumericID)
-		if derr != nil {
-			def = nil
-		}
-		if station > 0 && def != nil {
-			if st, ok := defAttrU64(def, boatTicketStationAttr); ok && st != station {
-				continue
-			}
-		}
-		// 必须在这里就写入租用状态：客户端构造租用记录时读的是票对象里的
-		// knpoijanngk，等它选完再写已经来不及（那时记录已失败）。
-		rented := s.startTicketRent(ctx, row, def)
-		tree, terr := s.ItemToTree(cctx, row)
-		if terr != nil {
-			continue
-		}
-		if rented {
-			ctx.Log.Info("3/7 按站点选票：已开始租用", "guid", guidShort(g), "item", row.ItemID)
-		}
-		ctx.Sess.Push(4, 21, proto.Args524(proto.GuidArr([]string{row.GUID})))
-		ctx.Sess.Push(4, 22, proto.Args(proto.S("61"), tree))
-		return tree
-	}
-	return nil
 }
 
 // startTicketRent 写入"已租用"状态并落库；返回是否发生改动。
@@ -190,7 +220,47 @@ func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) 
 	if err != nil {
 		return false
 	}
+	// 已激活且未过期的票：直接返回"无改动"。
+	// 客户端看门狗会以约 17ms 间隔反复发 3/7 验票；若每次都重写
+	// oieepfcgjgn（游戏分钟）和 iingicaldbk（到期时间，随 now 变化），
+	// 就会每秒推一次 4/21 remove + 4/22 add，把客户端刚构造好的租用
+	// 记录连同票对象打掉，客户端判定激活失败又重发 3/7——无限循环，
+	// 表现为上船黑屏。因此只有真正需要激活（0→1）或过期重置时才写入。
+	if ki := fieldIdxByCS(row.WireClass, "knpoijanngk"); ki >= 0 && ki < len(fields) {
+		if u64Of(fields[ki].Num) == 1 {
+			active := true
+			if ei := fieldIdxByCS(row.WireClass, csUpdated); ei >= 0 && ei < len(fields) {
+				active = u64Of(fields[ei].Num) > uint64(proto.WindowsFiletimeNow())
+			}
+			if active {
+				return false
+			}
+		}
+	}
 	changed := false
+	// 已过期的票：先清掉"激活"标记，让后面的正常激活逻辑重新写入。
+	// 否则过期票 knpoijanngk 还是 1，下面的 !=1 判定永远不成立，changed=false，
+	// 客户端弹框里继续显示锁定图标（认为票已在用），永远不让用户选中。
+	now := uint64(proto.WindowsFiletimeNow())
+	if idx := fieldIdxByCS(row.WireClass, csUpdated); idx >= 0 && idx < len(fields) {
+		if u64Of(fields[idx].Num) > 0 && u64Of(fields[idx].Num) <= now {
+			ctx.Log.Info("3/7 票已过期，重置激活标记", "guid", guidShort(row.GUID))
+			if ki := fieldIdxByCS(row.WireClass, "knpoijanngk"); ki >= 0 && ki < len(fields) {
+				if u64Of(fields[ki].Num) != 0 {
+					fields[ki].Num = ptrU64(0)
+					changed = true
+				}
+			}
+			if si := fieldIdxByCS(row.WireClass, csStateEnum); si >= 0 && si < len(fields) {
+				cur := u64Of(fields[si].Num)
+				if cur&boatTicketInUseFlag != 0 {
+					fields[si].Num = ptrU64(cur &^ boatTicketInUseFlag)
+					changed = true
+				}
+			}
+		}
+	}
+	// 正常激活：knpoijanngk 设为 1（未过期的票第一次使用 / 过期票重置后重新激活）。
 	if idx := fieldIdxByCS(row.WireClass, "knpoijanngk"); idx >= 0 && idx < len(fields) {
 		if u64Of(fields[idx].Num) != 1 {
 			fields[idx].Num = ptrU64(1)
@@ -496,5 +566,70 @@ func cleanupConsumedTickets(ctx *Ctx) {
 		}
 		s.Push(4, 21, proto.Args524(proto.GuidArr([]string{g})))
 		s.log.Info("已消耗船票已删除", "guid", guidShort(g))
+	}
+}
+
+// fieldNameByIdx 从 wiregen 拿到 wire class 的第 idx 个字段名；找不到返回 "?"。
+func fieldNameByIdx(wireClass string, idx int) string {
+	ci, ok := wiregen.ClassMeta[wireClass]
+	if !ok || idx >= len(ci.Fields) {
+		return "?"
+	}
+	return ci.Fields[idx].Name
+}
+
+// fmtField 把 proto.Field 格式化成字符串，用于 debug dump。
+func fmtField(f proto.Field) string {
+	switch f.Op {
+	case "OPT":
+		if f.Num == nil {
+			return "null"
+		}
+		return fmt.Sprintf("opt(%d)", *f.Num)
+	case "U32":
+		return fmt.Sprintf("u32(%d)", *f.Num)
+	case "U64":
+		return fmt.Sprintf("u64(%d)", *f.Num)
+	case "BYTE":
+		return fmt.Sprintf("byte(%d)", *f.Num)
+	case "U16":
+		return fmt.Sprintf("u16(%d)", *f.Num)
+	case "U32N":
+		if f.Str == nil {
+			return "u32n-null"
+		}
+		return "u32n(" + *f.Str + ")"
+	case "STR":
+		if f.Str == nil {
+			return "str-null"
+		}
+		return "str(" + *f.Str + ")"
+	case "OPTGUID":
+		if f.Hex == "" {
+			return "null-g"
+		}
+		return f.Hex
+	case "GUID16":
+		if f.Hex == "" {
+			return "<no-hex>"
+		}
+		return f.Hex
+	case "VAL":
+		if f.Val == nil {
+			return "null-val"
+		}
+		if f.Val.Kind == proto.KindObj {
+			var parts []string
+			for _, sub := range f.Val.Fields {
+				parts = append(parts, fmtField(sub))
+			}
+			return fmt.Sprintf("{type=%d,class=%s,[%s]}", f.Val.TypeID, f.Val.Class, strings.Join(parts, ","))
+		}
+		if f.Val.Kind == proto.KindNull {
+			return "null-obj"
+		}
+		return fmt.Sprintf("<val kind=%s>", f.Val.Kind)
+	default:
+		return fmt.Sprintf("<op=%s>", f.Op)
 	}
 }

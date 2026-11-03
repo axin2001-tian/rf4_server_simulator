@@ -272,6 +272,29 @@ func (s *Server) handlePlayerItemDelete(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]any{"ok": true, "queued": true})
 }
 
+// handlePlayerTicketsClear 清除某玩家"使用中"的船票：删除其背包内所有船票
+// 实例（TypeID == boatTicketTypeID），并把移除/档案刷新推送下去。
+//
+// 与"按 GUID 删除单件物品"不同，这里面向"租用状态卡死导致上船黑屏"的场景：
+// 玩家背包里的船票因服务端租用状态未清掉而一直显示"使用中"，既上不了船、
+// 也无法重新选票。后台一键清除可让玩家重新购买/选票。
+func (s *Server) handlePlayerTicketsClear(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UID int64 `json:"uid"`
+	}
+	if err := readJSON(r, &req); err != nil || req.UID == 0 {
+		httpError(w, 400, "参数错误：需要 uid")
+		return
+	}
+	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{
+		"op":  "clear_active_tickets",
+		"uid": req.UID,
+	}))
+	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "clear_active_tickets",
+		strconv.FormatInt(req.UID, 10), "清除使用中船票")
+	writeJSON(w, map[string]any{"ok": true, "queued": true})
+}
+
 func (s *Server) handlePlayerKeepnetAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UID       int64   `json:"uid"`

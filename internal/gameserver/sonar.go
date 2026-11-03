@@ -222,7 +222,12 @@ func makeSonarEcho(sizeCM, depthM float64) (*proto.Value, error) {
 
 func makeSonarCell(echoes []*proto.Value) (*proto.Value, error) {
 	if len(echoes) == 0 {
-		return proto.ElemNull(), nil
+		// 空格必须用通用 null（0x00）。
+		// 客户端解码器没有 0xFF 分支——发 ElemNull 会让它抛
+		// "NotImplementedException: Not implemented 255"（Player.log 实测发生在
+		// TcpChannel::_fromSocket 解码声呐网格时），连接层解析失败 → 断线重连
+		// → 上船流程中断（表现为上船黑屏）。
+		return proto.Null(), nil
 	}
 	code := sonarEchoArgCode
 	return wiregen.MakeObj(sonarCellClass, map[int]*proto.Value{
@@ -239,7 +244,7 @@ func makeEmptySonarResponse(systemID string) (*proto.Value, error) {
 }
 
 // synthesizeSonar 生成声呐网格：2 到 5 个鱼群中心向邻近格扩散，
-// 空格编码为 0xFF；未知水域返回 15003 空数组。
+// 空格编码为通用 null（0x00，客户端不认 0xFF）；未知水域返回 15003 空数组。
 func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*proto.Value, error) {
 	grids, err := loadSonarGrids()
 	if err != nil {

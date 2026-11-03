@@ -73,7 +73,8 @@ func TestSonarSynthesisKnownWaterShape(t *testing.T) {
 
 	nonEmpty := 0
 	for idx, cell := range cells.Items {
-		if cell.Kind == proto.KindElemNull {
+		// 空格两种编码都合法：0xFF（KindElemNull，旧）与 0x00（KindNull，现行）。
+		if cell.Kind == proto.KindElemNull || cell.Kind == proto.KindNull {
 			continue
 		}
 		nonEmpty++
@@ -126,7 +127,9 @@ func TestSonarSynthesisWireRoundTrip(t *testing.T) {
 
 	foundEcho := false
 	for _, cell := range cells.Items {
-		if cell == nil || cell.Kind == proto.KindElemNull {
+		// 空格两种编码都合法：0xFF（KindElemNull，旧）与 0x00（KindNull，
+		// 现行——客户端解码器没有 0xFF 分支，发 ElemNull 会抛 NotImplementedException）。
+		if cell == nil || cell.Kind == proto.KindElemNull || cell.Kind == proto.KindNull {
 			continue
 		}
 		if cell.Class != sonarCellClass || cell.Field(0).Val.ArgCodeStr() != sonarEchoArgCode {

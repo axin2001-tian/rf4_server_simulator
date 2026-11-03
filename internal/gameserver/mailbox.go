@@ -739,6 +739,33 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 			}
 		}
 		s.log.Info("管理指令：删除物品", "uid", cmd.UID, "count", len(deleted))
+	case "clear_active_tickets":
+		// 清除玩家中"使用中"的船票：删除背包内所有船票实例（TypeID == 162）。
+		// 仅删背包里的船票，不动地图买断（place_access buyout）等其他数据。
+		deleted := make([]string, 0)
+		guids, gerr := s.DB.ItemGUIDsByContainers(ctx, cmd.UID, []string{"backpack"})
+		if gerr != nil {
+			s.log.Warn("管理指令：清除船票：列背包失败", "uid", cmd.UID, "err", gerr)
+		} else {
+			for _, guid := range guids {
+				row, rerr := s.DB.GetItemByGUID(ctx, guid)
+				if rerr != nil || row == nil || row.UID != cmd.UID || row.TypeID != boatTicketTypeID {
+					continue
+				}
+				if err := s.DB.DeleteItemCascade(ctx, guid); err != nil {
+					s.log.Warn("管理指令：清除船票失败", "uid", cmd.UID, "guid", guidShort(guid), "err", err)
+					continue
+				}
+				deleted = append(deleted, guid)
+			}
+		}
+		if len(deleted) > 0 {
+			for _, sess := range s.sessionsForUID(cmd.UID) {
+				sess.Push4_21(deleted)
+				sess.Push2_1()
+			}
+		}
+		s.log.Info("管理指令：清除使用中船票", "uid", cmd.UID, "count", len(deleted))
 	case "add_keepnet":
 		if cmd.Keepnet == nil {
 			s.log.Warn("管理指令：增加护网鱼缺少数据", "uid", cmd.UID)
