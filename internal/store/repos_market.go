@@ -159,6 +159,20 @@ func (d *DB) GradeLines(ctx context.Context, fishKey string) (val, tro, sup *int
 	return
 }
 
+// SpeciesMaxWeight 该鱼种的最大体重（克），用于 813 标尺的上限位（f3）。
+// 无数据时 ok=false。
+func (d *DB) SpeciesMaxWeight(ctx context.Context, fishKey string) (int64, bool) {
+	var m sql.NullInt64
+	if err := d.SQL.QueryRowContext(ctx,
+		`SELECT max_g FROM species_weight WHERE fish_key=?`, fishKey).Scan(&m); err != nil {
+		return 0, false
+	}
+	if m.Valid && m.Int64 > 0 {
+		return m.Int64, true
+	}
+	return 0, false
+}
+
 // SpeciesLengthKP 返回体长公式 k*w^p 的系数。NULL 或缺少记录时使用
 // LENGTH_K_DEFAULT 和 LENGTH_P_DEFAULT。
 func (d *DB) SpeciesLengthKP(ctx context.Context, fishKey string) (k, p float64) {

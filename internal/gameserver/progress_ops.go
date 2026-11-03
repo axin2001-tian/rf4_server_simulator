@@ -90,7 +90,8 @@ func (s *Server) settleCatchXP(ctx context.Context, uid int64, f *RolledFish, ri
 		"鱼种", f.Species, "重量", f.WeightG, "grade", f.Grade,
 		"基础经验", r.baseXP, "总经验", r.totalXP,
 		"新纪录", r.isRecord, "累计", r.totalXp, "等级", r.newLevel,
-		"技能", r.skillID, "熟练度增量", r.skillGain)
+		"技能", r.skillID, "熟练度增量", r.skillGain,
+		"标尺", s.settleStatics(ctx, f.Species))
 	return r
 }
 
@@ -264,9 +265,22 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 	} else {
 		f0 = int64(math.Round(float64(f1) * 0.173))
 	}
+	// f3（标尺上限）优先用官方说明里的"最大体重"（species_weight.max_g，
+	// 已按 rf4db 官方目录回填）；缺失时按蓝冠线的 1.25 倍估算。
 	f3 := int64(math.Round(float64(f2) * 1.25))
+	if s.DB != nil {
+		if mx, ok := s.DB.SpeciesMaxWeight(ctx, species); ok && mx > f2 {
+			f3 = mx
+		}
+	}
 	f4 := int64(math.Round(float64(f2) * 1.1))
 	f5 := int64(math.Round(float64(f2) * 1.2))
+	if f4 > f3 {
+		f4 = f3
+	}
+	if f5 > f3 {
+		f5 = f3
+	}
 	return [6]int64{f0, f1, f2, f3, f4, f5}
 }
 

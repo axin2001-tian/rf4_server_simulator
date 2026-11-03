@@ -33,6 +33,11 @@ for db in dbs:
             (v.get("达标线"), v.get("奖杯线"), v.get("蓝冠线"), key),
         )
         changed += cur.rowcount
+        if v.get("最大体重"):
+            cur.execute(
+                "update species_weight set max_g=? where fish_key=? and (max_g is null or max_g<?)",
+                (v["最大体重"], key, v["最大体重"]),
+            )
     conn.commit()
     cur.execute("select count(*), sum(case when trophy_g is null then 1 else 0 end) from species_weight")
     print(db, "rows changed", changed, "total/null:", cur.fetchone())

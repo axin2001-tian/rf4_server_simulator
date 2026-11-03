@@ -22,6 +22,8 @@ BASE = "https://rf4db.com/zh/fishes/"
 HDRS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) rf4db-local-tool/1.0"}
 
 PAIR_RE = re.compile(r"<dt>\s*(达标线|奖杯线|蓝冠线)\s*</dt>\s*<dd>\s*([^<]*?)\s*</dd>", re.S)
+# 官方说明里的"最大体重/最大重量"（例如"最大体重记录为 40 公斤"、"最大重量可以达到60公斤"）
+MAX_RE = re.compile(r"最大(?:体重|重量)[^。；;]{0,30}?([0-9]+(?:\.[0-9]+)?)\s*(公斤|千克|kg|克|g)", re.I)
 
 
 def parse_weight_g(txt):
@@ -49,6 +51,13 @@ def fetch(key):
             got = {}
             for name, val in PAIR_RE.findall(html):
                 got[name] = parse_weight_g(val)
+            mx = MAX_RE.search(html)
+            if mx:
+                unit = mx.group(2).lower()
+                v = float(mx.group(1))
+                if unit in ("公斤", "千克", "kg"):
+                    v *= 1000
+                got["最大体重"] = int(round(v))
             if "达标线" in got:
                 return key, got, None
             last = "no thresholds in page"
