@@ -237,8 +237,10 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 		return st
 	}
 	f1, f2 := int64(1600), int64(2700)
+	var val *int64
 	if s.DB != nil {
-		_, tro, sup := s.DB.GradeLines(ctx, species)
+		v, tro, sup := s.DB.GradeLines(ctx, species)
+		val = v
 		if tro != nil && *tro > 0 {
 			f1 = *tro
 		}
@@ -249,10 +251,13 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 	if f2 <= f1 {
 		f2 = f1 * 5 / 3
 	}
-	// 达标线优先用 Wiki 的 Record（绿旗）实测值；没有数据时回退到内置表，
-	// 最后才按奖杯线比例估算（仅用于缺少公开数据的鱼种）。
+	// 达标线（"稀有鱼的最低重量"）优先用 species_weight.trophy_g——该列已按
+	// rf4db 的官方目录回填（252 种）；缺失时才退回 Wiki 记录值/内置表，
+	// 最后按奖杯线比例估算。
 	f0 := int64(0)
-	if v := fishRecordWeight(species); v > 0 {
+	if val != nil && *val > 0 {
+		f0 = *val
+	} else if v := fishRecordWeight(species); v > 0 {
 		f0 = v
 	} else if st, ok := speciesFightStatics[species]; ok {
 		f0 = st[0]
