@@ -279,17 +279,29 @@ func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) 
 			})
 			changed = true
 		} else {
-			// 复用库里的时效对象时，必须把 f0（U32N 字符串）的 nil 规范化为
-			// 空字符串：nil 会编码成 0x7FFFFFFF（"null u32str"约定），客户端
-			// 构造租用记录 jfnimfgkepk 时按长度读字符串，0x7FFFFFFF 远大于
-			// 剩余数据 → "Параметр count не равен размеру сериализованных
-			// данных"（Player.log 实测）→ 记录构造失败 → BoatWatchDog 以
-			// 16ms 间隔死循环重发 3/7（表现为选票后反复 activate 上不了船）。
+			// 复用库里的时效对象时，必须规范化为与"新建"一致的形状：
+			//  - f0（U32N 字符串）nil → ""：nil 编码 0x7FFFFFFF，客户端构造
+			//    租用记录 jfnimfgkepk 时按长度读字符串直接越界（黑屏根因之一）。
+			//  - f2 起始 / f3 时长必须对齐本次租用。预置数据里的旧时长（如 7200）
+			//    与票面定义（120 分钟）不一致时，客户端判定激活无效，
+			//    BoatWatchDog _startWatching(pStart=False) 以 17ms 死循环重发 3/7
+			//    （实测 ticket_boat_norw_sea_a_120，对照 komar_24 新建对象可上船）。
 			obj := fields[idx].Val
 			if len(obj.Fields) > 0 && obj.Fields[0].Str == nil {
 				empty := ""
 				obj.Fields[0].Str = &empty
 				changed = true
+			}
+			if len(obj.Fields) >= 4 {
+				start := uint64(time.Now().Unix() / 60)
+				if obj.Fields[2].Num == nil || *obj.Fields[2].Num != start {
+					obj.Fields[2].Num = ptrU64(start)
+					changed = true
+				}
+				if obj.Fields[3].Num == nil || *obj.Fields[3].Num != minutes {
+					obj.Fields[3].Num = ptrU64(minutes)
+					changed = true
+				}
 			}
 		}
 	}
