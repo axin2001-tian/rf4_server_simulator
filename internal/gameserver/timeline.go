@@ -19,10 +19,18 @@ func registerTimelineHandlers(d *Dispatch) { // fire-and-forget：客户端不�
 	d.Register(24, 3, hSocialCurrent) // social/current：返回当前公共聊天频道
 	d.Register(24, 12, hU32ArrEmpty)  // social/bl_get 黑名单 → 空 u32 数组
 	d.Register(9, 5, hCraftTemplates)
-	d.Register(3, 18, hPlayerWarnings)
-	d.RegisterResponseContract(3, 18, ResponseContractRule{
-		Kind: proto.KindArgs, ArgCode: "189", ArgItemTypeIDs: []uint32{3005},
-	})
+	// 3/18 player/warnings：故意不注册处理器，走 contract dto(lcjmijeeebm) 兜底。
+	// 实证对照（2026-11-03）：
+	//   - v0.1.2（无处理器，contract dto 兜底）→ 选票后能正常上船；
+	//   - args(189)（上游 e125cb6）与 args(524)（本地旧 hack）→ 客户端
+	//     BoatWatchDog _startWatching(pStart=False)，17ms 死循环重发 3/7，
+	//     表现为上船黑屏（trace 实测 23:41:21 3/18 → 23:41:47 租票 → 循环）。
+	// 上船链路依赖该 dto 形状的兜底响应，先回退到 v0.1.2 行为保上船；
+	// 警告列表 UI 如需 args 形状，须另行找到与看门狗兼容的响应。
+	// d.Register(3, 18, hPlayerWarnings)
+	// d.RegisterResponseContract(3, 18, ResponseContractRule{
+	// 	Kind: proto.KindArgs, ArgCode: "189", ArgItemTypeIDs: []uint32{3005},
+	// })
 
 	// 环境/视觉（28 族，纯构造最小合法结构）
 	d.Register(28, 1, hEnvironment)
