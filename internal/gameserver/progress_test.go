@@ -109,6 +109,19 @@ func TestXpMonotonicLevel(t *testing.T) {
 	if want := levelForXp(xpOnly); lvl < want {
 		t.Fatalf("xp-only 修改后 level=%d < levelForXp(%d)=%d", lvl, xpOnly, want)
 	}
+	// 回滚保护：等级未变而 xp 变小（过期表单快照）→ 维持现值
+	l34 := int64(34)
+	stale := int64(32000000)
+	lvl, xpAfter = AdminResolveLevelXP(&l34, &stale, 34, 35846520)
+	if lvl != 34 || xpAfter != 35846520 {
+		t.Fatalf("回滚保护失效: got %d/%d, want 34/35846520", lvl, xpAfter)
+	}
+	// 等级未变、xp 变大 → 正常生效
+	up := int64(36000000)
+	lvl, xpAfter = AdminResolveLevelXP(&l34, &up, 34, 35846520)
+	if lvl != 34 || xpAfter != 36000000 {
+		t.Fatalf("同等级调大 xp 失效: got %d/%d, want 34/36000000", lvl, xpAfter)
+	}
 }
 
 // TestSettleMembershipDoesNotChangeXP 验证会员身份只影响档案展示，不改变钓获经验。

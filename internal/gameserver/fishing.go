@@ -489,8 +489,9 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 		}
 	}
 	// 有可信装备数据时，将重量限制在钓组上限内；gearCapKg<=0 时不设额外上限。
-	if gearCapKg > 0 {
-		w = capWeightGrams(w, int64(gearCapKg*1000))
+	// fish_weight_cap_scale：>1 整体放大上限，<=0 完全解除上限，默认 1 保持原行为。
+	if cs := s.tunableF("fish_weight_cap_scale", 1.0); cs > 0 && gearCapKg > 0 {
+		w = capWeightGrams(w, int64(gearCapKg*1000*cs))
 	}
 	grade := s.rollGradeDB(cctx, key, w)
 	grade = applyTrophyLuck(grade, bonus.TrophyLuck)
@@ -663,9 +664,15 @@ func (s *Server) rollFishPoolsWithRules(loc string, gearCapKg float64, bonus fis
 	}
 	// 有装备物理数据时使用动态上限；缺少可信数据时使用内置上限，
 	// 并按 fight_tolerance 放宽。
-	cap := poolWeightCapG(gearCapKg, bonus.FightTolerance)
-	if cap > 0 && w > cap {
-		w = cap
+	// fish_weight_cap_scale：>1 整体放大上限，<=0 完全解除上限，默认 1 保持原行为。
+	if cs := s.tunableF("fish_weight_cap_scale", 1.0); cs > 0 {
+		cap := poolWeightCapG(gearCapKg, bonus.FightTolerance)
+		if cs != 1.0 {
+			cap *= cs
+		}
+		if cap > 0 && w > cap {
+			w = cap
+		}
 	}
 	weightG := int64(math.Round(w))
 	if weightG < 1 {

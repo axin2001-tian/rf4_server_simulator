@@ -18,8 +18,10 @@ func AdminResolveLevelXP(levelReq, xpReq *int64, curLevel, curXp int64) (level, 
 	if xpReq != nil {
 		xp = *xpReq
 	}
-	if xpReq == nil && levelReq != nil {
-		// 只改等级时，将经验对齐到该等级的累计门槛。
+	if xpReq == nil && levelReq != nil && level != curLevel {
+		// 只改等级（且等级真的变了）时，将经验对齐到该等级的累计门槛。
+		// 等级未变时不重排：后台表单可能是打开面板时的旧快照，
+		// 重排会把玩家已获得的经验回滚到门槛值（客户端会重复弹"新级别"）。
 		xp = baseXp(level)
 	}
 	if level < 1 {
@@ -33,6 +35,11 @@ func AdminResolveLevelXP(levelReq, xpReq *int64, curLevel, curXp int64) (level, 
 	}
 	if b := baseXp(level); xp < b {
 		xp = b
+	}
+	// 经验回滚保护：等级未变而 xp 变小，视为过期表单快照，维持现值。
+	// 经验模型单调只增；确需降级时请同时显式给出目标等级。
+	if level == curLevel && xp < curXp {
+		xp = curXp
 	}
 	return level, xp
 }

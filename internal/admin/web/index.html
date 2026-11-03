@@ -68,7 +68,7 @@ button,input,select,textarea{font:inherit;color:var(--text)}button{cursor:pointe
 <div class="toast" id="toast"></div>
 <script>
 let TOKEN=localStorage.getItem('rf4_admin_token')||'';
-let VIEW='dashboard',PLAYER=null,PLAYER_TAB='profile',FISH_AREA='',FISH_CFG=null,STORE_ITEMS=[];
+let VIEW='dashboard',PLAYER=null,PLAYER_TAB='profile',FISH_AREA='',FISH_CFG=null,STORE_ITEMS=[],PF_SNAPSHOT=null;
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Number(n||0).toLocaleString('zh-CN');
@@ -182,6 +182,9 @@ function renderPlayerTab(){
   const p=PLAYER;
   if(!p)return;
   if(PLAYER_TAB==='profile'){
+    // 快照当前值：保存时只提交真正改过的字段，避免把打开面板后
+    // 玩家新获得的经验/货币用旧值回滚（会导致重复弹"新级别"）。
+    PF_SNAPSHOT={name:p.name,level:p.level,xp:p.xp,silver:p.silver,gold:p.gold,bank:p.bank,membership:p.membership?1:0,membership_exp:p.membership_exp||0};
     $('#playerTabBody').innerHTML=`<div class="form-grid">
       <div class="field span2"><label>昵称</label><input id="pf_name" value="${esc(p.name)}"></div>
       <div class="field"><label>等级</label><input id="pf_level" type="number" min="1" max="58" value="${p.level}"></div>
@@ -204,11 +207,25 @@ function localInput(ts){
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 async function saveProfile(){
+  const cur=PF_SNAPSHOT||{};
   const expRaw=$('#pf_membership_exp').value;
   const membership=+$('#pf_membership').value;
-  const membership_exp=membership===1&&expRaw?Math.floor(new Date(expRaw).getTime()/1000):0;
-  const body={uid:PLAYER.uid,name:$('#pf_name').value,level:+$('#pf_level').value,xp:+$('#pf_xp').value,silver:+$('#pf_silver').value,gold:+$('#pf_gold').value,bank:+$('#pf_bank').value};
-  if(membership!==PLAYER.membership||expRaw!==localInput(PLAYER.membership_exp)){
+  const membership_exp=expRaw?Math.floor(new Date(expRaw).getTime()/1000):0;
+  // 只提交相对快照有变化的字段；未修改的字段不发送，服务端保留现值。
+  const body={uid:PLAYER.uid};
+  const name=$('#pf_name').value;
+  if(name!==cur.name) body.name=name;
+  const level=+$('#pf_level').value;
+  if(level!==cur.level) body.level=level;
+  const xp=+$('#pf_xp').value;
+  if(xp!==cur.xp) body.xp=xp;
+  const silver=+$('#pf_silver').value;
+  if(silver!==cur.silver) body.silver=silver;
+  const gold=+$('#pf_gold').value;
+  if(gold!==cur.gold) body.gold=gold;
+  const bank=+$('#pf_bank').value;
+  if(bank!==cur.bank) body.bank=bank;
+  if(membership!==cur.membership||expRaw!==localInput(cur.membership_exp)){
     if(membership===1&&(!Number.isFinite(membership_exp)||membership_exp<=Date.now()/1000)){toast('请选择未来的到期时间','bad');return;}
     body.membership=membership;body.membership_exp=membership_exp;
   }
