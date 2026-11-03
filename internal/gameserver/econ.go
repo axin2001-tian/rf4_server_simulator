@@ -111,6 +111,10 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		stats813 = s.build813(cctx, uid, pending, prevBest, skillGain)
 		profileTree, _ = s.BuildProfile307(cctx, uid)
 		skill312 = s.buildSingleSkill312(cctx, uid, skillID)
+		// 结算摘要：鱼种/重量/档位/历史最佳，便于核对"模型=结算"和重量标准。
+		ctx.Log.Info("14/4 结算", "species", pending.Species, "weight_g", pending.WeightG,
+			"grade", pending.Grade, "prev_best_g", prevBest, "xp", xp,
+			"statics", s.settleStatics(cctx, pending.Species))
 	}
 
 	// 801（空竿也回完整 801，f0/f6/f7 = null）

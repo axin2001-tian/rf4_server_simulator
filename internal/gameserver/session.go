@@ -39,6 +39,13 @@ type Session struct {
 	stateMu sync.Mutex
 	state   map[string]any // 会话级业务状态（选图、抛竿状态等）
 
+	// fishPushMu / fishPush* 用于抑制同一尾鱼的重复 14/14 推送。
+	// 重复推送会让客户端销毁并重建鱼实体（14/12 回 f0=6"新鱼已替换旧鱼"），
+	// 搏斗状态被重置，表现为溜鱼时下方力度条不显示。
+	fishPushMu   sync.Mutex
+	fishPushGUID string
+	fishPushAt   time.Time
+
 	log *slog.Logger
 }
 
@@ -122,7 +129,7 @@ func (s *Session) Push(main, sub uint8, body *proto.Value) uint32 {
 	defer s.sendMu.Unlock()
 	callID := uint32(s.Srv.nextCallID(s.Token))
 	env := proto.BuildRequestEnvelope(callID, main, sub, append(bodyBytes, 0x01))
-	if traceCmds {
+	if traceCmds && !traceSkip[cmdKey(main, sub)] {
 		s.log.Info("TRACE 推", "cmd", cmdKey(main, sub), "len", len(bodyBytes),
 			"hex", traceHexHead(bodyBytes, 160))
 	}

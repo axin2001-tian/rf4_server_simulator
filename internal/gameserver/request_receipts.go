@@ -131,7 +131,7 @@ func (d *Dispatch) executeRequest(ctx *Ctx, interceptReplies bool) requestExecut
 	// 兜底链中 body==nil 表示无需回包。
 	if body, kind := d.srv.fallbackFor(ctx.Main, ctx.Sub); body != nil {
 		gsFallbacks.WithLabelValues(kind).Inc()
-		if traceCmds {
+		if traceCmds && !traceSkip[ctx.Key()] {
 			ctx.Sess.log.Info("TRACE 回(兜底)", "cmd", ctx.Key(), "kind", kind, "len", len(body),
 				"hex", traceHexHead(body, traceHexMax))
 		}
@@ -150,7 +150,7 @@ func (d *Dispatch) finishHandlerResponse(ctx *Ctx, body []byte) requestExecution
 		ctx.Sess.log.Error("拒发响应：顶层合同不符", "cmd", ctx.Key(), "reason", reason)
 		return failedRequestResult("response contract rejected: " + reason)
 	}
-	if traceCmds {
+	if traceCmds && !traceSkip[ctx.Key()] {
 		ctx.Sess.log.Info("TRACE 回", "cmd", ctx.Key(), "len", len(body),
 			"hex", traceHexHead(body, traceHexMax))
 	}
@@ -282,7 +282,7 @@ func (s *Server) replayRequestReceipt(ctx *Ctx, rec *store.RequestReceipt) {
 	}
 	result := requestExecutionResult{body: rec.ResponseBody, hasResponse: true,
 		nativeFailure: rec.ErrorText == nativeFailureReceipt}
-	if traceCmds {
+	if traceCmds && !traceSkip[ctx.Key()] {
 		ctx.Log.Info("TRACE 回(回执重放)", "cmd", ctx.Key(), "len", len(result.body),
 			"hex", traceHexHead(result.body, 160))
 	}

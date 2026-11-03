@@ -179,8 +179,12 @@ func hCheckTicket(ctx *Ctx) ([]byte, bool) {
 
 // startTicketRent 写入"已租用"状态并落库；返回是否发生改动。
 //
-// 租期默认取票定义里的 gloegohmand（分钟），可用运行参数 boat_rent_minutes
-// 覆盖（管理后台 /api/tunables，用于短租期测试）。
+// 租期只取票定义里的 gloegohmand（分钟）。**不要**再用运行参数覆盖：
+// 客户端的租用记录会拿票的时效对象 f3 与本地物品定义比对，时长不一致时
+// BoatWatchDog 判定激活失败，_startWatching(pStart=False) 后以 ~16ms 间隔
+// 死循环重发 3/7，表现为买完票按 E 上船黑屏。
+// 实测：boat_rent_minutes=14400 期间 norw_sea_a_24（定义 1440）必然黑屏；
+// 改回定义时长后同一张票可正常上船。
 func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) bool {
 	minutes := uint64(1440)
 	if def != nil {
@@ -188,8 +192,12 @@ func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) 
 			minutes = v
 		}
 	}
-	if v := s.tunableF("boat_rent_minutes", 0); v > 0 {
-		minutes = uint64(v)
+	if minutes < 1 {
+		minutes = 1
+	}
+	if minutes > 10080 {
+		// 防御：票定义异常时不至于让时效对象离谱到客户端判定无效。
+		minutes = 10080
 	}
 	db := s.DB
 
@@ -208,6 +216,19 @@ func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) 
 			active := true
 			if ei := fieldIdxByCS(row.WireClass, csUpdated); ei >= 0 && ei < len(fields) {
 				active = u64Of(fields[ei].Num) > uint64(proto.WindowsFiletimeNow())
+			}
+			// 时效对象里的时长必须和票定义一致。历史数据里被 boat_rent_minutes
+			// 写成 14400 的票，客户端会判定"租用记录无效"，即使 knpoijanngk=1、
+			// 到期时间仍在未来也不会复用；这里把它当成需要重新对齐的票。
+			if active {
+				ri := fieldIdxByCS(row.WireClass, "bkmnbppciao")
+				if ri < 0 || ri >= len(fields) || fields[ri].Val == nil ||
+					fields[ri].Val.Kind != proto.KindObj || len(fields[ri].Val.Fields) < 4 ||
+					u64Of(fields[ri].Val.Fields[3].Num) != minutes {
+					active = false
+					ctx.Log.Info("3/7 票时效时长与定义不一致，重新对齐", "guid", guidShort(row.GUID),
+						"want_min", minutes)
+				}
 			}
 			if active {
 				return false

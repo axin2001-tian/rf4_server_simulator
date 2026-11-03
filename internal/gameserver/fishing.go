@@ -960,7 +960,22 @@ func speciesPullKOrDefault(sp string) float64 {
 // ---- 搏鱼曲线（fight_curves_sets.json）----
 
 // Push14_14 发判鱼推送：args("524")[guid(钓组), 27]。
+//
+// 同一尾鱼 5 秒内只推一次：重复推送会让客户端把已建好的鱼实体销毁重建
+// （14/12 回 f0=6），搏斗状态（含下方力度条）随之重置。
 func (s *Session) Push14_14(f *RolledFish, hookGUID, gearGuid string) {
+	s.fishPushMu.Lock()
+	if f.FishGUID != "" && s.fishPushGUID == f.FishGUID && time.Since(s.fishPushAt) < 5*time.Second {
+		s.fishPushMu.Unlock()
+		if s.log != nil {
+			s.log.Info("忽略重复的 14/14 推送", "guid", shortGUID(f.FishGUID))
+		}
+		return
+	}
+	s.fishPushGUID = f.FishGUID
+	s.fishPushAt = time.Now()
+	s.fishPushMu.Unlock()
+
 	if gearGuid == "" {
 		gearGuid = "00000000000000000000000000000000"
 	}
@@ -985,6 +1000,16 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	now := time.Now()
 	bonus := s.fishingBonus(sess.pushCtx(), sess.Userid, st.RigType)
 	st.mu.Lock()
+	// 已经有一条"推给客户端、还没结算"的鱼时，禁止任何补排再次判鱼。
+	// 实测（2026-11-04 02:10:45）：14/7 补排与原定时器各判一条，50ms 内推了
+	// 两尾不同的鱼，客户端显示第一尾的模型、结算却按第二尾算
+	// （玩家反馈"钓上来 1 号鱼，结算却是 2 号"）。
+	// 只有真正的新抛竿（resetCast）才允许清掉重排；补排（14/7 / 14/11）不动。
+	if !resetCast && st.PushSent && st.Pending != nil {
+		st.mu.Unlock()
+		s.log.Info("排咬钩被忽略：当前已有未结算的鱼", "gen", st.BiteGen, "uid", sess.Userid)
+		return
+	}
 	if st.biteTimer != nil {
 		st.biteTimer.Stop()
 	}
@@ -1017,6 +1042,9 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	delay := s.biteDelay(st, bonus)
 	st.BiteAt = now.Add(time.Duration(delay * float64(time.Second)))
 	uid := sess.Userid
+	pending := st.Pending != nil
+	s.log.Info("排咬钩", "uid", uid, "gen", gen, "delay", delay, "resetCast", resetCast,
+		"preserveHooked", preserveHooked, "pending", pending, "hooked", st.Hooked)
 	timer := time.AfterFunc(time.Until(st.BiteAt), func() {
 		s.onBiteTimer(uid, gen)
 	})
@@ -1032,7 +1060,9 @@ func (s *Server) onBiteTimer(uid int64, gen uint64) {
 	if gen != st.BiteGen {
 		// 被重排替换掉的旧定时器：既不能清指针，也不能判鱼。否则会把新
 		// 定时器的指针清空，它就成了“没人管但仍在跑”的第二条鱼。
+		cur := st.BiteGen
 		st.mu.Unlock()
+		s.log.Info("咬钩定时器已作废", "uid", uid, "gen", gen, "cur", cur)
 		return
 	}
 	st.biteTimer = nil
@@ -1043,13 +1073,18 @@ func (s *Server) onBiteTimer(uid int64, gen uint64) {
 		return
 	}
 	if !st.CastActive || st.Resolved || st.PushSent {
+		push := st.PushSent
+		res := st.Resolved
+		ca := st.CastActive
 		st.mu.Unlock()
+		s.log.Info("咬钩定时器跳过", "uid", uid, "castActive", ca, "resolved", res, "pushSent", push)
 		return
 	}
 	if st.Pending != nil {
 		// 钩上已经有鱼（或刚要结算），不能再判一条：否则会把 Pending 覆盖掉，
 		// 客户端还在溜旧鱼，结算却按新鱼算。
 		st.mu.Unlock()
+		s.log.Info("咬钩定时器跳过：已有未结算的鱼", "uid", uid)
 		return
 	}
 	if !st.InWater {
@@ -1140,6 +1175,15 @@ func (s *Server) repushPending14_14(uid int64) {
 	}
 	if !st.CastActive || st.Resolved || st.Pending == nil {
 		st.mu.Unlock()
+		return
+	}
+	// 14/12 的 f0=3 是在"还没收到 14/14"时排队重推的；定时器到点前可能已经
+	// 正常判鱼并推过一次（PushSent=true）。这时再推同一尾鱼会让客户端销毁并
+	// 重建鱼实体（14/12 回 f0=6"新鱼已替换旧鱼"），搏斗状态被重置，
+	// 表现就是溜鱼时下方力度条不显示。已经有新推送时直接取消重推。
+	if st.PushSent {
+		st.mu.Unlock()
+		s.log.Info("取消重推 14/14：期间已正常推送", "uid", uid)
 		return
 	}
 	f := st.Pending

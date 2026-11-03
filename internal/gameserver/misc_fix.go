@@ -7,6 +7,7 @@ package gameserver
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -374,6 +375,16 @@ func hSocialMove(ctx *Ctx) ([]byte, bool) {
 	if name == "" {
 		name = ch.Name
 	}
+	// 客户端在上船/跨水域时可能以 ~16ms 间隔重发 24/1；只在目标频道变化时
+	// 记一行日志，否则整个日志会被这条命令淹没（实测 76 行/秒）。
+	prevName := ""
+	if v, ok := ctx.Sess.GetState("channel"); ok {
+		if m, ok := v.(map[string]any); ok {
+			if s, ok := m["name"].(string); ok {
+				prevName = s
+			}
+		}
+	}
 	// 记住会话当前频道：24/10 公聊回显、24/3 current 都要用它。
 	ctx.Sess.SetState("channel", map[string]any{
 		"name":    name,
@@ -395,23 +406,79 @@ func hSocialMove(ctx *Ctx) ([]byte, bool) {
 	if users < 1 {
 		users = 1
 	}
+	// 实验开关：data/socialmove.mode 里的取值决定 24/1 的响应形状。
+	// 客户端（4.0.25034）在 24/1 上会以 ~16ms 间隔无限重发，直到移动被接受；
+	// 用这个开关可以只重启 gameserver 就逐一试出它能接受的字段组合。
+	mode := socialMoveMode()
+	switch mode {
+	case "null":
+		if prevName != name {
+			ctx.Log.Info("24/1 social/move 实验：回 null", "channel", name)
+		}
+		return []byte{0x00}, true
+	case "emptyargs":
+		body, err := proto.EncodeValue(proto.Args(proto.S("20")), ctx.Sess.Table())
+		if err != nil {
+			return nil, false
+		}
+		if prevName != name {
+			ctx.Log.Info("24/1 social/move 实验：空 args", "channel", name)
+		}
+		return body, true
+	}
+	f1 := "公共频道"
+	f4 := uint64(0)
+	f7 := uint64(1)
+	var f6 *proto.Value = proto.Null()
+	f8 := proto.Bool(false)
+	switch mode {
+	case "kind1":
+		f4 = 1
+	case "opt1":
+		f8 = proto.Bool(true)
+	case "member":
+		f6 = proto.U32Arr([]uint32{uint32(ctx.Sess.Userid)})
+	case "id512":
+		var h uint32
+		for i := 0; i < len(name); i++ {
+			h = h*131 + uint32(name[i])
+		}
+		f7 = 512 + uint64(h%1024)
+	case "name1":
+		f1 = name
+	}
 	obj := wiregen.MustMakeObj("godhiicbgng", map[int]*proto.Value{
 		0: proto.StrVal(name), // f0 必须与请求的目标频道名一致
-		1: proto.StrVal("公共频道"),
+		1: proto.StrVal(f1),
 		2: proto.StrVal(ch.Region),
 		3: proto.U32(uint32(users)),
-		4: proto.U32(0), // 0=Public
+		4: proto.U32(uint32(f4)), // 0=Public
 		5: proto.Bool(false),
-		6: proto.Null(), // 成员列表懒加载
-		7: proto.U32(1),
-		8: proto.Bool(false),
+		6: f6,
+		7: proto.U32(uint32(f7)),
+		8: f8,
 	})
 	body, err := proto.EncodeValue(obj, ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
-	ctx.Log.Info("24/1 social/move 切换频道", "channel", name)
+	if prevName != name {
+		ctx.Log.Info("24/1 social/move 切换频道", "channel", name, "from", prevName, "mode", mode)
+	}
 	return body, true
+}
+
+// socialMoveMode 读取 24/1 响应的实验开关（缺省 obj = 正常频道对象）。
+func socialMoveMode() string {
+	b, err := os.ReadFile("data/socialmove.mode")
+	if err != nil {
+		return "obj"
+	}
+	m := strings.TrimSpace(string(b))
+	if m == "" {
+		return "obj"
+	}
+	return m
 }
 
 // hSocialPublic 处理 24/10 公聊，命令本身不返回响应。
