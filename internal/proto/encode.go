@@ -347,7 +347,14 @@ func ZeroField(op string) (Field, error) {
 	case "U16":
 		f.Num = ptrU64(0)
 	case "STR", "U16STR", "U32N":
-		// Str nil = null
+		// 零值必须用空字符串，不能用 nil：
+		// nil 会编码成 0xFF / 0xFFFF / 0xFFFFFFFF（"null 字符串"约定），
+		// 而客户端的值解码器没有 0xFF 分支（Player.log 实测抛
+		// NotImplementedException: Not implemented 255 → 整帧丢弃 → 断线重连，
+		// 典型现场：24/1 social/move 兜底 dto 连续三个 STR 零值 = ff ff ff，
+		// 客户端进导航区后 16ms 一次 24/1，秒断线，表现为上船黑屏）。
+		empty := ""
+		f.Str = &empty
 	case "GUID16":
 		f.Hex = "00000000000000000000000000000000"
 	case "BYTES":

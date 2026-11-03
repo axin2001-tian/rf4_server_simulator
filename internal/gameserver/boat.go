@@ -78,16 +78,13 @@ func hFamilyFallbackPlayer(ctx *Ctx) ([]byte, bool) {
 // 上船黑屏 / 反复弹"买船票"提示；回 null 则抛 NullReferenceException，
 // 效果相同。
 //
-// 因此返回空的开放式值列表（type_id 哨兵 98765）：客户端强转 IEnumerable
-// 成功、遍历不到任何元素，既不崩也不需要编造警告内容。
+// 因此返回空 args 列表（"524"，count=0）：客户端把它解码成空集合，
+// 强转 IEnumerable 成功、遍历不到任何元素。此前回"98765 哨兵空 dto"
+// 是错的——客户端不认识 type 98765，按未知类型解码时报
+// "Параметр count не равен размеру сериализованных данных"（Player.log
+// 实测 18:52:56），整帧解析失败 → 断线重连循环（表现为重复断线/上船黑屏）。
 func hPlayerWarnings(ctx *Ctx) ([]byte, bool) {
-	body, err := proto.EncodeValue(&proto.Value{Kind: proto.KindValList}, wiregen.Table())
-	if err != nil {
-		ctx.Log.Warn("3/18 编码空警告数组失败", "err", err)
-		return []byte{0x00}, true
-	}
-	ctx.Log.Info("3/18 player/warnings（返回空数组）", "len", len(body))
-	return body, true
+	return []byte{0x03, 0x03, '5', '2', '4', 0x00, 0x00}, true
 }
 
 // hCheckTicket 处理 3/7：请求参数为 [站点枚举, 船票 GUID]。
@@ -301,6 +298,19 @@ func (s *Server) startTicketRent(ctx *Ctx, row *store.Item, def *store.ItemDef) 
 				3: proto.U32(uint32(minutes)),
 			})
 			changed = true
+		} else {
+			// 复用库里的时效对象时，必须把 f0（U32N 字符串）的 nil 规范化为
+			// 空字符串：nil 会编码成 0x7FFFFFFF（"null u32str"约定），客户端
+			// 构造租用记录 jfnimfgkepk 时按长度读字符串，0x7FFFFFFF 远大于
+			// 剩余数据 → "Параметр count не равен размеру сериализованных
+			// данных"（Player.log 实测）→ 记录构造失败 → BoatWatchDog 以
+			// 16ms 间隔死循环重发 3/7（表现为选票后反复 activate 上不了船）。
+			obj := fields[idx].Val
+			if len(obj.Fields) > 0 && obj.Fields[0].Str == nil {
+				empty := ""
+				obj.Fields[0].Str = &empty
+				changed = true
+			}
 		}
 	}
 	// 票的到期时间直接对齐到"现在 + 租期"：客户端提示里的"X 后过期"
