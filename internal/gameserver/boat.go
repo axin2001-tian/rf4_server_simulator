@@ -44,7 +44,8 @@ func init() { RegisterExtra(registerBoatHandlers) }
 // 单向通知，不需要回包），这里不重复注册，避免注册顺序漂移。
 func registerBoatHandlers(d *Dispatch) {
 	d.Register(3, 7, hCheckTicket)
-	d.Register(3, 18, hPlayerWarnings)
+	// 3/18 player/warnings 由 timeline.go 的 hPlayerWarnings 处理（上游 e125cb6），
+	// 这里不再重复注册，避免重复定义与注册顺序漂移。
 	// main=3 族（player/*）全兜底处理器：客户端会发大量 player/* 命令，
 	// 我们不可能逐条注册；兜底器通过 fallbackFor 根据 command_contract.json
 	// 里的形状表（kind=none/null/args/dto）返回正确的空响应，避免客户端
@@ -64,27 +65,6 @@ func hFamilyFallbackPlayer(ctx *Ctx) ([]byte, bool) {
 		ctx.Log.Info("3/" + fmt.Sprintf("%d", ctx.Sub) + " 兜底回包", "len", len(body))
 	}
 	return body, true
-}
-
-// hPlayerWarnings 处理 3/18 player/warnings。
-//
-// 客户端启动时会主动发这条命令查询"收到的游戏警告/提示"。它的处理链是
-// kdnajnloahj.iblhidcfike → bdjblkfkjfc[T]，内部把响应强转
-// System.Collections.IEnumerable 再遍历——期望的是"警告对象数组"。
-//
-// 回单个 lcjmijeeebm 对象会抛 InvalidCastException（Player.log 实测：
-// "Unable to cast object of type 'lcjmijeeebm' to type 'IEnumerable'"），
-// kdnajnloahj 状态机崩溃后，BoatWatchDog 的后续逻辑连带失败，表现为
-// 上船黑屏 / 反复弹"买船票"提示；回 null 则抛 NullReferenceException，
-// 效果相同。
-//
-// 因此返回空 args 列表（"524"，count=0）：客户端把它解码成空集合，
-// 强转 IEnumerable 成功、遍历不到任何元素。此前回"98765 哨兵空 dto"
-// 是错的——客户端不认识 type 98765，按未知类型解码时报
-// "Параметр count не равен размеру сериализованных данных"（Player.log
-// 实测 18:52:56），整帧解析失败 → 断线重连循环（表现为重复断线/上船黑屏）。
-func hPlayerWarnings(ctx *Ctx) ([]byte, bool) {
-	return []byte{0x03, 0x03, '5', '2', '4', 0x00, 0x00}, true
 }
 
 // hCheckTicket 处理 3/7：请求参数为 [站点枚举, 船票 GUID]。
