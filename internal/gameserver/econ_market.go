@@ -38,6 +38,7 @@ func registerEconMarket(d *Dispatch) {
 	d.Register(21, 4, hWorkshopOrder) // 官方金币通道同样是换件结构
 	d.Register(17, 12, hRodSetDepth)
 	d.Register(17, 13, hRodSetClip)
+	d.Register(17, 14, hRodSetDrag)
 	d.Register(17, 15, hReelElectro)
 }
 
@@ -1795,6 +1796,55 @@ func hRodSetClip(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 	return nil, true
+}
+
+// hRodSetDrag 17/14（fire-and-forget）：渔轮摩擦/转速设定值上报。
+//
+// 报文形状与 17/13 相同：args(52) + 竿 guid + u32（实测 27）。客户端每次启动都按默认值
+// 复位，是因为服务端没有把设定值记下来回填；这里按竿保存并写回钓组桩的 f6。
+func hRodSetDrag(ctx *Ctx) ([]byte, bool) {
+	srv := ctx.Sess.Srv
+	rodGUID, value := parseRodGuidInt(ctx.Tree)
+	if rodGUID == "" {
+		return nil, true
+	}
+	ctx.Log.Info("17/14 设置摩擦/转速", "竿", shortGUID(rodGUID), "值", value)
+	if srv.DB != nil {
+		_ = srv.DB.UpsertRodSetting(ctx.Sess.pushCtx(), rodGUID, reelDragSettingKey,
+			strconv.FormatInt(value, 10))
+		srv.rodRigSetDrag(ctx.Sess.pushCtx(), rodGUID, value)
+	}
+	return nil, true
+}
+
+// rodRigSetDrag 把摩擦/转速值写回竿实例钓组桩的第 6 个字段，保留其他钓组状态。
+func (s *Server) rodRigSetDrag(ctx context.Context, rodGUID string, value int64) bool {
+	row, err := s.DB.GetItemByGUID(ctx, rodGUID)
+	if err != nil || row == nil {
+		return false
+	}
+	fields, err := FieldsFromJSON(row.FieldsJSON)
+	if err != nil {
+		return false
+	}
+	idx := fieldIdxByCS(row.WireClass, csRigObject)
+	if idx < 0 || idx >= len(fields) {
+		return false
+	}
+	stored := fields[idx].Val
+	if stored == nil || stored.Kind != proto.KindObj || len(stored.Fields) <= 6 {
+		return false
+	}
+	clone := *stored
+	clone.Fields = append([]proto.Field(nil), stored.Fields...)
+	if clone.Fields[6].Op != "VAL" {
+		clone.Fields[6].Op = "U32"
+	}
+	clone.Fields[6].Num = ptrU64(uint64(value))
+	fields[idx].Op = "VAL"
+	fields[idx].Val = &clone
+	s.saveItemFields(ctx, row, fields)
+	return true
 }
 
 // hReelElectro 17/15（fire-and-forget）：电轮开关/档位上报。
