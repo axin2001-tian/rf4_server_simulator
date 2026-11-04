@@ -236,10 +236,13 @@ func makeSonarCell(echoes []*proto.Value) (*proto.Value, error) {
 }
 
 func makeEmptySonarResponse(systemID string) (*proto.Value, error) {
-	code := sonarCellArgCode
+	// 注意：这里不能带 args(15004)。客户端解码 args 时会先按 code 解析元素类型，
+	// 4.0.25034 的 OpenTypeResolver 没有 15004，哪怕 0 个元素也会抛
+	// "GetType not found: 15004" 并断开连接（2026-11-04 09:59 实测）。
+	// 因此空网格直接给 f1=null。
 	return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
 		0: proto.StrVal(systemID),
-		1: proto.Args(&code),
+		1: proto.Null(),
 	})
 }
 

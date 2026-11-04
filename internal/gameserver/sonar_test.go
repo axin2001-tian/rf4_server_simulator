@@ -155,8 +155,9 @@ func TestSonarUnknownWaterReturnsEmptyGrid(t *testing.T) {
 		t.Fatalf("未知水域 f0=%q", got)
 	}
 	cells := obj.Field(1).Val
-	if cells == nil || cells.Kind != proto.KindArgs || cells.ArgCodeStr() != sonarCellArgCode || cells.ArgCount() != 0 {
-		t.Fatalf("未知水域应回空 args(15004): %#v", cells)
+	if cells == nil || cells.Kind != proto.KindNull {
+		// 客户端 4.0.25034 不认识 15004，空网格也必须是 null 而不是 args(15004)。
+		t.Fatalf("未知水域应回 f1=null: %#v", cells)
 	}
 
 	body, err := proto.EncodeValue(obj, wiregen.Table())
