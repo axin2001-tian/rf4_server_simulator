@@ -78,6 +78,7 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 	pending := st.Pending
 	hooked := st.Hooked
 	rigType := st.RigType
+	gearGUID := st.GearGuid
 	st.mu.Unlock()
 
 	cctx := ctx.Sess.pushCtx()
@@ -132,7 +133,7 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 	}
 	obj801, err := wiregen.MakeObj("caagocpofin", map[int]*proto.Value{
 		0:  f0,
-		1:  proto.U32(castBaseDistanceBits(rigType)),
+		1:  proto.U32(s.castDistanceBitsForRig(cctx, uid, gearGUID, rigType)),
 		2:  proto.U32(f32Const801F2),
 		3:  build5003(),
 		4:  proto.Null(),
@@ -282,35 +283,51 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 
 	st.mu.Lock()
 	pending := st.Pending
-	var echo string
 	if pending != nil {
-		echo = want
-		if echo == "" {
-			echo = pending.FishGUID
+		if want != "" && !strings.EqualFold(want, pending.FishGUID) {
+			st.mu.Unlock()
+			ctx.ReplyFailure("System.ArgumentException", "入护的鱼与本次钓获不一致")
+			return nil, true
 		}
 		kept := *pending
-		kept.FishGUID = echo
 		if kept.LocLevel == "" {
 			kept.LocLevel = s.currentLevel(uid)
 		}
 		keepLevel := kept.LocLevel
-		// 落库
-		err := s.DB.KeepnetInsert(cctx, &store.KeepnetEntry{
-			EchoGUID: echo, UID: uid, Species: kept.Species, NameZh: kept.Name,
+		capacity, err := s.keepnetCapacity(cctx, uid)
+		if err != nil {
+			st.mu.Unlock()
+			ctx.ReplyFailure("System.IO.IOException", "护网容量未能读取，请重试")
+			return nil, true
+		}
+		keptInNet, err := s.DB.KeepFishingCatchWithCapacity(cctx, &store.KeepnetEntry{
+			EchoGUID: kept.FishGUID, UID: uid, Species: kept.Species, NameZh: kept.Name,
 			WeightG: kept.WeightG, LengthM: kept.LengthM, Cat: kept.Grade,
 			KeepLoc: st.Loc, KeepSpot: int64(st.Spot), KeepBait: st.Bait,
 			KeepLevel: keepLevel, TS: float64(time.Now().UnixNano()) / 1e9,
-		})
-		if err == nil {
-			_ = s.DB.CatchLogInsert(cctx, uid, st.Loc, int64(st.Spot), kept.Species, "",
-				kept.WeightG, kept.LengthM, "keep", st.Bait, kept.Grade, kept.XP, kept.Silver, kept.LocLevel)
-			st.Pending = nil
+		}, kept.XP, kept.Silver, capacity)
+		if err != nil {
+			st.mu.Unlock()
+			if err == store.ErrKeepnetFull {
+				ctx.ReplyFailure("System.InvalidOperationException", "护网已满，请先腾出位置")
+			} else {
+				ctx.ReplyFailure("System.IO.IOException", "入护未能保存，请重试")
+			}
+			return nil, true
+		}
+		st.Pending = nil
+		st.CastActive = false
+		st.Hooked = false
+		st.Resolved = true
+		if keptInNet {
 			st.Keepnet = append(st.Keepnet, &kept)
-			pending = &kept
 		}
 		st.mu.Unlock()
-		f25 := s.buildPending25(&kept, st, keepLevel)
-		body, err2 := proto.EncodeValue(build800(proto.Args(proto.S("61"), f25), proto.Null(), proto.Null()), ctx.Sess.Table())
+		out := proto.Args(proto.S("61"))
+		if keptInNet {
+			out.Items = append(out.Items, s.buildPending25(&kept, st, keepLevel))
+		}
+		body, err2 := proto.EncodeValue(build800(out, proto.Null(), proto.Null()), ctx.Sess.Table())
 		if err2 != nil {
 			return nil, false
 		}

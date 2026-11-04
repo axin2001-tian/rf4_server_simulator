@@ -298,4 +298,7 @@ func (s *Server) sendRequestResult(ctx *Ctx, result requestExecutionResult) {
 		return
 	}
 	ctx.Sess.SendEnvelope(proto.BuildResponseEnvelope(ctx.CallID, result.body))
+	for _, fn := range ctx.afterResponse {
+		fn()
+	}
 }

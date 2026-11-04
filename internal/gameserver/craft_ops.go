@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -303,6 +304,7 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	}
 	uid := ctx.Sess.Userid
 	demands := parseDemands(recipe.MaterialsJSON)
+	isBaitCraft := strings.HasPrefix(recipe.RecipeID, "craft_bait_")
 
 	// 先在事务外构造物品；构造失败时尚未扣材料。
 	producedRow, err := srv.prepareNewItem(cctx, uid, outputID, "backpack", times, "")
@@ -438,7 +440,8 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 
-	row, merged, err := grantPreparedItemTx(cctx, tx, producedRow, false)
+	// 鱼饵和作者现有可堆叠物品一样并入同编号背包堆，避免每做一次多出一个 30 个的独立堆。
+	row, merged, err := grantPreparedItemTx(cctx, tx, producedRow, isBaitCraft)
 	if err != nil {
 		return fail("产出物入库失败", "output", outputID, "err", err)
 	}
@@ -450,8 +453,22 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	if err := tx.Commit(); err != nil {
 		return fail("事务提交失败", "err", err)
 	}
+	masteryGain := 0.0
+	if isBaitCraft {
+		before, skillErr := srv.DB.GetSkillPoints(cctx, uid, captureBaitSkillID)
+		if skillErr != nil {
+			ctx.Log.Warn("9/1 读取捕获鱼饵熟练度失败", "err", skillErr)
+		} else if before < baitMasteryCap {
+			after := math.Min(baitMasteryCap, math.Round((before+baitMasteryStep)*10)/10)
+			if err := srv.DB.AddSkillPoints(cctx, uid, captureBaitSkillID, baitMasteryStep); err != nil {
+				ctx.Log.Warn("9/1 捕获鱼饵熟练度写入失败", "err", err)
+			} else {
+				masteryGain = after - before
+			}
+		}
+	}
 	ctx.Log.Info("9/1 制作入库", "output", outputID, "qty", times,
-		"took", len(touched), "recipe", recipe.RecipeID)
+		"took", len(touched), "recipe", recipe.RecipeID, "mastery_gain", masteryGain)
 
 	produced := make([]*proto.Value, 0, 1)
 	if tree, terr := srv.ItemToTree(cctx, row); terr == nil {
@@ -467,7 +484,12 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 			upsert = append(upsert, tree)
 		}
 	}
-	return srv.replyCraftResult(ctx, true, produced, upsert, removed)
+	ctx.AfterResponse(func() {
+		if masteryGain > 0 {
+			ctx.Sess.Push2_4SkillTree("制作鱼饵 " + outputID)
+		}
+	})
+	return srv.replyCraftResultWithMastery(ctx, true, produced, upsert, removed, captureBaitSkillID, masteryGain)
 }
 
 // alignItemRowQty 将 item.qty 与可计件物品字段中的数量对齐，非计件物品保持 1。
@@ -766,6 +788,11 @@ func hCraftMine2(ctx *Ctx) ([]byte, bool) {
 	if !srv.requireDB(ctx) {
 		return nil, false
 	}
+	// 同一命令也被客户端用于铲子/红虫长柄勺挖饵。先识别工具；
+	// 不是挖饵工具时才继续走作者原有的分解分支。
+	if body, handled := srv.tryBaitDig(ctx); handled {
+		return body, true
+	}
 	guids := uniqueStrings(deepGUIDs(ctx.Tree))
 	if len(guids) == 0 {
 		return nil, false // 没有 GUID 时交给兜底链
@@ -1001,6 +1028,16 @@ func craftDemandObjs(recipe *store.Recipe) []*proto.Value {
 // f0 成败、f1 产出物品、f6 背包增量、f8 被移除的 GUID。可选字段为空时不写入。
 func (s *Server) replyCraftResult(ctx *Ctx, ok bool, produced, upsert []*proto.Value, removed []string) ([]byte, bool) {
 	return s.replyCraftResultWithSkill(ctx, ok, produced, upsert, removed, nil, nil)
+}
+
+// replyCraftResultWithMastery 保留固定熟练度增长调用，并复用统一的 803 回包构造。
+func (s *Server) replyCraftResultWithMastery(ctx *Ctx, ok bool, produced, upsert []*proto.Value,
+	removed []string, skillID int64, masteryGain float64) ([]byte, bool) {
+	var progress *proto.Value
+	if masteryGain > 0 {
+		progress = masteryGainValue(skillID, masteryGain)
+	}
+	return s.replyCraftResultWithSkill(ctx, ok, produced, upsert, removed, progress, nil)
 }
 
 // replyCraftResultWithSkill 额外写入 f2 310 进度块和 f3 单大类技能树。

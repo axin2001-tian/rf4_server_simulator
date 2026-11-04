@@ -62,7 +62,9 @@ type RolledFish struct {
 	XP       int64
 	Silver   int64
 	LocLevel string
-	NamedID  string // 被命名鱼
+	Stamina  float64 // obj27#05 搏鱼体力池；0=按体重和已验证兜底比例计算
+	Force    float64 // obj27#08 拉力；0=按体重和已验证比例计算
+	NamedID  string  // 被命名鱼
 	Name     string
 }
 
@@ -300,11 +302,18 @@ var defaultFishPool = []fishPoolEntry{
 // maxMockWeight 是缺少可信装备物理数据时使用的重量上限。
 const maxMockWeight = 650
 
-// speciesPullK 保存鱼种拉力系数，默认值为 0.016。
-var speciesPullK = map[string]float64{
-	"c.roach": 0.0162, "crucian": 0.0147, "perch": 0.0176, "c.carp": 0.0133,
-	"s.bream": 0.0126, "e.chub": 0.0171, "bream": 0.0147, "a.sleeper": 0.0138,
-}
+// 以下三项来自旧版对真实服务器 14/14 帧的逐字节校准：
+// 53g -> 体力池 126.5661239624、拉力 0.5197524514；
+// 63g -> 拉力 0.6178189516。旧版两条样本的拉力都严格满足每克 0.00980665。
+const (
+	verifiedStaminaPerGram      = 2.3880400747623083
+	verifiedInitialStaminaRatio = 0.5628187656402588
+	verifiedForcePerGram        = 0.009806650025503976
+	// 实机反馈鱼体力见底过快：默认把体力池放大 4 倍，并让鱼以 85% 体力开局。
+	// 两项都可通过 tunables 的 fish_stamina_scale / fish_initial_stamina_ratio 调整。
+	defaultFishStaminaScale        = 4.0
+	defaultFishInitialStaminaRatio = 0.85
+)
 
 // lengthSeed 保存体长公式 k*w^p 的参数。
 var lengthSeed = map[string][2]float64{
@@ -380,6 +389,12 @@ func (s *Server) rollFishForRig(ctx context.Context, uid int64, gearGUID, loc, b
 }
 
 func (s *Server) rollFishWithRules(loc, bait string, gearCapKg float64, bonus fishingSkillBonus) *RolledFish {
+	if s.tunableF("fish_bait_rules_enabled", 0) == 1 {
+		if s.DB == nil {
+			return nil
+		}
+		return s.rollFishFromDBWithRules(loc, bait, gearCapKg, bonus)
+	}
 	if s.DB != nil {
 		if f := s.rollFishFromDBWithRules(loc, bait, gearCapKg, bonus); f != nil {
 			return f
@@ -396,6 +411,7 @@ func (s *Server) rollFishFromDB(loc, bait string) *RolledFish {
 }
 
 func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bonus fishingSkillBonus) *RolledFish {
+	strict := s.tunableF("fish_bait_rules_enabled", 0) == 1
 	cctx := s.dbCtx()
 	statLoc := s.DB.ResolveStatLoc(cctx, loc)
 	if statLoc == "" {
@@ -437,11 +453,17 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 				wts[i] = ov.Weight
 				hasPositive = true
 			}
-			if !hasPositive {
+			if !hasPositive && !strict {
 				copy(wts, base)
 				keys = keys[:len(roster)]
 				wts = wts[:len(roster)]
 			}
+		}
+	}
+	if strict {
+		keys, wts = s.filterFishBaits(statLoc, bait, keys, wts)
+		if len(keys) == 0 {
+			return nil
 		}
 	}
 	// companion 周纪录饵效（config bait_pref_scale / bait_pref_weight_shift；
@@ -524,8 +546,9 @@ func companionTierMult(tier int64) float64 {
 	return 1.0
 }
 
-// weightSkewK 右偏钟形的右尾拉伸系数（WEIGHT_SKEW_K；越大奖杯越稀）。
-const weightSkewK = 2.6
+// weightSkewK 右偏钟形的右尾拉伸系数。
+// 过大会把绝大多数体重压到平均值附近；1.6 能让小、中、大个体分布更明显。
+const weightSkewK = 1.6
 
 // sampleWeightDB 按鱼种自然体重分布采样。
 // 峰值取达标带中点，上限取蓝冠线的 1.05 倍，并使用对数正态分布和拒绝采样。
@@ -554,18 +577,20 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult float6
 	if modeMult != 1.0 {
 		M *= modeMult // 饵效命中：峰值锚点向奖杯线右移
 	}
-	// 上限 hi：蓝冠线×1.05（缺 sup→tro*1.30→M*6.0）
+	// 整体峰值向右上抬 15%，让日常鱼获里更容易出现中大个体。
+	M *= 1.15
+	// 上限 hi：蓝冠线×1.25（缺 sup→tro*1.45→M*6.0）
 	var hi float64
 	switch {
 	case sup != nil:
-		hi = supf * 1.05
+		hi = supf * 1.25
 	case tro != nil:
-		hi = trof * 1.30
+		hi = trof * 1.45
 	default:
 		hi = M * 6.0
 	}
 	// 下限 lo：少量"太小/不达标"个体
-	lo := M * 0.15
+	lo := M * 0.12
 	if val != nil {
 		lo = math.Min(lo, vf*0.2)
 	}
@@ -872,6 +897,29 @@ func gradeMapVal(m map[int64]float64, grade int64) float64 {
 }
 
 // buildFish27 构造 27 判鱼对象。
+func (s *Server) fishStaminaFor(f *RolledFish) float64 {
+	if f == nil {
+		return 0
+	}
+	stamina := f.Stamina
+	if stamina <= 0 {
+		stamina = verifiedStaminaPerGram * float64(f.WeightG)
+	}
+	scale := s.tunableF("fish_stamina_scale", defaultFishStaminaScale)
+	if scale > 0 {
+		stamina *= scale
+	}
+	return stamina
+}
+
+func (s *Server) fishInitialStaminaRatio() float64 {
+	ratio := s.tunableF("fish_initial_stamina_ratio", defaultFishInitialStaminaRatio)
+	if ratio <= 0 {
+		return defaultFishInitialStaminaRatio
+	}
+	return math.Max(0.05, math.Min(1.0, ratio))
+}
+
 func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string) *proto.Value {
 	w := float64(f.WeightG)
 	st := officialSpeciesStatics[f.Species]
@@ -896,14 +944,17 @@ func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string) *proto.Va
 		f16v, f17v, f18v = fb[16], fb[17], fb[18]
 		f19v, f20v = fb[19], fb[20]
 	}
-	pull := math.Max(0.5, math.Round(w*speciesPullKOrDefault(f.Species)*10000)/10000)
+	stamina := s.fishStaminaFor(f)
+	initialStamina := s.fishInitialStaminaRatio()
+	pull := f.Force
+	if pull <= 0 {
+		pull = verifiedForcePerGram * w
+	}
 	// fight_power_scale：整体缩放鱼的拉力（同时影响 26 条张力曲线）。
-	// 调低可显著减少断线与收杆脱钩，调高则更硬核；默认 1.0 不改变原行为。
+	// 调低可显著减少断线与收杆脱钩，调高则更硬核；默认 1.0 保持真实样本比例。
 	if k := s.tunableF("fight_power_scale", 1.0); k > 0 && k != 1.0 {
 		pull = math.Max(0.5, math.Round(pull*k*10000)/10000)
 	}
-	score := math.Round(pushScoreRate(f.Species, f.Grade)*math.Max(1, w)*100) / 100
-	quality := fishQuality(f.Species, f.Grade)
 
 	var named *string
 	name := f.Name
@@ -928,8 +979,8 @@ func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string) *proto.Va
 		2:  proto.U32(uint32(f.Grade)),
 		3:  proto.F32(float32(f.LengthM)),
 		4:  proto.U32(uint32(f.WeightG)),
-		5:  proto.F32(float32(score)),
-		6:  proto.F32(float32(quality)),
+		5:  proto.F32(float32(stamina)),
+		6:  proto.F32(float32(initialStamina)),
 		8:  proto.F32(float32(pull)),
 		9:  proto.F32(float32(f9)),
 		10: proto.F32(float32(f10)),
@@ -948,13 +999,6 @@ func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string) *proto.Va
 		23: proto.Guid(hook),
 		24: proto.Null(),
 	})
-}
-
-func speciesPullKOrDefault(sp string) float64 {
-	if k, ok := speciesPullK[sp]; ok {
-		return k
-	}
-	return 0.016
 }
 
 // ---- 搏鱼曲线（fight_curves_sets.json）----
@@ -979,6 +1023,18 @@ func (s *Session) Push14_14(f *RolledFish, hookGUID, gearGuid string) {
 	if gearGuid == "" {
 		gearGuid = "00000000000000000000000000000000"
 	}
+	stamina := s.Srv.fishStaminaFor(f)
+	initialStamina := s.Srv.fishInitialStaminaRatio()
+	force := f.Force
+	if force <= 0 {
+		force = verifiedForcePerGram * float64(f.WeightG)
+	}
+	if k := s.Srv.tunableF("fight_power_scale", 1.0); k > 0 && k != 1.0 {
+		force = math.Max(0.5, math.Round(force*k*10000)/10000)
+	}
+	s.log.Info("14/14 发鱼",
+		"鱼种", f.Species, "重量_g", f.WeightG, "体力池", stamina,
+		"初始体力", initialStamina, "拉力", force)
 	s.Push(14, 14, proto.Args524(
 		proto.Guid(gearGuid),
 		s.Srv.buildFish27(f, hookGUID, gearGuid),
@@ -1150,6 +1206,13 @@ func (s *Server) onBiteTimer(uid int64, gen uint64) {
 		return
 	}
 	f := s.rollFishForRig(s.dbCtx(), uid, st.GearGuid, st.Loc, st.Bait, st.Bonus)
+	if f == nil {
+		st.PushSent = false
+		st.Pending = nil
+		st.Resolved = true
+		st.mu.Unlock()
+		return
+	}
 	f.LocLevel = s.currentLevel(uid)
 	st.Pending = f
 	gear := st.GearGuid

@@ -99,6 +99,9 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	return s
 }
 
+// Handler 返回管理后台路由，供统一入口直接挂载；不依赖独立监听端口。
+func (s *Server) Handler() http.Handler { return s.mux }
+
 // SetSessionCount 供外部更新在线会话数。
 func (s *Server) SetSessionCount(n int64) { s.sessionCount.Store(n) }
 
@@ -236,6 +239,10 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readJSON(r, &req); err != nil || req.Key == "" {
 		httpError(w, 400, "参数错误")
+		return
+	}
+	if req.Key == "fish_bait_rules_enabled" && req.Value != "0" && req.Value != "1" {
+		httpError(w, 400, "吃饵规则开关只能为 0 或 1")
 		return
 	}
 	if err := s.db.TunableSet(r.Context(), req.Key, req.Value, adminOf(r)); err != nil {

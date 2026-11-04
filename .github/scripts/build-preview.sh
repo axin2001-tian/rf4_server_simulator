@@ -26,7 +26,7 @@ mkdir -p "${STAGE}/bin" "${STAGE}/certs"
 
 echo "Building ${VERSION} from ${COMMIT_SHA}"
 LDFLAGS="-s -w -X 'rf4server/internal/buildinfo.Version=${VERSION}'"
-for command in gateway gameserver admin seed; do
+for command in gateway gameserver seed; do
   GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" \
     -o "${STAGE}/bin/${command}.exe" "./cmd/${command}"
 done
@@ -69,8 +69,7 @@ Commit: ${COMMIT_SHA}
 
 3. 启动
    双击“启动服务器.cmd”，或运行 bin\launcher.exe。
-   控制面板：http://127.0.0.1:9500
-   管理后台：http://127.0.0.1:8080
+   统一控制中心：http://127.0.0.1:9500（运行控制 + 管理后台）
    初始管理员：admin / admin123
 
 4. 注意
@@ -109,6 +108,11 @@ cat > "${RELEASE_NOTES}" <<EOF
 $(git log -20 --format='- @%h %s')
 EOF
 cp "${RELEASE_NOTES}" "${STAGE}/发布说明.md"
+
+if [[ -e "${STAGE}/bin/admin.exe" ]]; then
+  echo "refusing to package standalone admin.exe; admin is embedded in launcher" >&2
+  exit 1
+fi
 
 if find "${STAGE}" -type f \( -name 'rf4server.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | grep -q .; then
   echo "refusing to package runtime save files" >&2

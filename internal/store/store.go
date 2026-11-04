@@ -2,7 +2,7 @@
 //
 // 主库（WAL 模式）承载玩家状态、运营表和运行时表（会话凭据、指令队列、
 // 共享 KV）；静态资料库以只读 schema ATTACH。
-// 三个进程（gateway/gameserver/admin）共享同一个主库文件，
+// gateway、gameserver 与内嵌在 launcher 的 admin handler 共享同一个主库文件，
 // 跨进程并发依赖 WAL + busy_timeout。
 package store
 
