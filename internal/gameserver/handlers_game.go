@@ -381,9 +381,11 @@ type premiumBundleItem struct {
 //   - 技能书 seafish_book：category 80 的顶层物品类要按 wrapper ipdakkbfoja/13301 发，
 //     发成 13300（书目配置类）客户端会强转失败卡载入；
 //   - Venga SBH 10000 渔轮在目录里只有线杯/握丸，没有整轮定义，暂不发；
+//   - Venga SBH 10000 渔轮在目录里的 id 是 spin_5140_sbtn（13630，category 6）；
 //   - 狼鳚港雕像在目录里没有明确对应项，暂不发。
 var premiumBundleItems = []premiumBundleItem{
 	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1}, // Saltmaster SBH 88 鱼竿
+	{ItemID: "spin_5140_sbtn", Qty: 1},        // Venga SBH 10000 渔轮
 	{ItemID: "seafish_book", Qty: 1},          // 书「海钓入门技能书」
 	{ItemID: "fb_lf_makrel", Qty: 1},          // 一套海鱼饵（盒内清单）
 	{ItemID: "fb_lf_saida", Qty: 1},
