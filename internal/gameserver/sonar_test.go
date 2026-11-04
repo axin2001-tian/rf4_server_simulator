@@ -193,6 +193,11 @@ func TestSonarEchoSamplingRanges(t *testing.T) {
 
 func TestSonarHandlerReturnsEmbeddedGrid(t *testing.T) {
 	srv, _ := newRigTestServer(t)
+	// 默认 sonar_echo=0 只回空网格（客户端 4.0.25034 不认识 15004 会断线），
+	// 这里显式打开回声以验证网格生成逻辑本身。
+	if err := srv.DB.TunableSet(context.Background(), "sonar_echo", "1", "test"); err != nil {
+		t.Fatal(err)
+	}
 	registerDynamicProtocolHandlers(srv.dispatch)
 	body, ok := hDynamicSonar(dynamicTestCtx(srv, rigRequestTree(t, proto.StrVal("loc12_01"))))
 	if !ok {

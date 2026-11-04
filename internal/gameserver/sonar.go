@@ -302,5 +302,13 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 }
 
 func (s *Server) sonarResponse(ctx context.Context, systemID string) (*proto.Value, error) {
+	// 客户端 4.0.25034 的 OpenTypeResolver 没有注册 15004：一旦 1/10 里带回
+	// 真实的声呐网格（args(15004) 里的格子对象），客户端解码 TcpChannel 时会抛
+	// "OpenTypeResolver.GetType not found: 15004"，连接层解析失败后主动断开，
+	// 表现为上船/切图后每隔几秒重连一次（Player.log 2026-11-04 09:50:23 实测）。
+	// 默认只回 15003 空网格；确实需要声呐回波时用运行参数 sonar_echo=1 打开。
+	if s.tunableF("sonar_echo", 0) < 1 {
+		return makeEmptySonarResponse(systemID)
+	}
 	return synthesizeSonar(systemID, s.sonarProfileFor(ctx, systemID), newSonarRand())
 }
