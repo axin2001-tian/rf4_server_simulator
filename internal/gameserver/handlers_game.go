@@ -1126,6 +1126,8 @@ func hFishStats(ctx *Ctx) ([]byte, bool) {
 // registerSessionHandlers 注册登录时间线 + 钓鱼族。
 func registerSessionHandlers(d *Dispatch) {
 	d.Register(3, 1, hProfile)
+	d.Register(3, 14, hTackleAid)
+	d.Register(3, 15, hTackleAid)
 	d.Register(3, 2, hFishStats)
 	d.Register(4, 1, hItemCount)
 	d.Register(4, 4, hItemGUIDs)
