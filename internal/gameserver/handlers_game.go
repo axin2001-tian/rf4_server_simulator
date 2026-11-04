@@ -377,10 +377,13 @@ type premiumBundleItem struct {
 // 说明：
 //   - 海鱼饵不整盒发（box_sea_baits 这套盒物品在本机客户端加载不出来，会卡"正在下载"），
 //     改为按盒内清单逐件发同款海饵，效果一致且都是能正常显示的物品；
-//   - 目录里没有的（Saltmaster SBH 88 鱼竿、Venga SBH 10000 渔轮、狼鳚港雕像）先不发；
+//   - Saltmaster SBH 88 鱼竿在目录里的 id 是 pilkr_10208_fu88_sbtn（10410，category 3）；
+//   - Venga SBH 10000 渔轮在目录里只有线杯/握丸，没有整轮定义，暂不发；
+//   - 狼鳚港雕像在目录里没有明确对应项，暂不发；
 //   - 技能书（category 80）暂时也发不出来，等确定 wire 类型后再补。
 var premiumBundleItems = []premiumBundleItem{
-	{ItemID: "fb_lf_makrel", Qty: 1}, // 一套海鱼饵（盒内清单）
+	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1}, // Saltmaster SBH 88 鱼竿
+	{ItemID: "fb_lf_makrel", Qty: 1},          // 一套海鱼饵（盒内清单）
 	{ItemID: "fb_lf_saida", Qty: 1},
 	{ItemID: "fb_lf_seld", Qty: 1},
 	{ItemID: "fb_bf_makrel", Qty: 1},

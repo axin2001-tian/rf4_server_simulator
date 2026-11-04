@@ -64,12 +64,16 @@ var bottomRigTypes = map[int64]bool{
 	12: true, 13: true, 14: true, 15: true, 16: true, 17: true, 18: true,
 	23: true, 24: true, 25: true, 26: true, 27: true, 28: true, 29: true,
 	32: true, 34: true,
+	// 海钓沉底族（Marine Bottom *）：同为沉底守竿钓法，不能按浮子处理。
+	55: true, 56: true, 57: true, 58: true, 59: true, 60: true,
 }
 
 // rigTypeLureFamily 收索拟饵族：鱼在收线中攻击拟饵，咬钩节奏与"就位"守门单独走。
 var rigTypeLureFamily = map[int64]bool{
 	5: true, 6: true, 7: true, 8: true, 9: true, 10: true, 11: true,
 	19: true, 20: true, 22: true,
+	// 海钓铁板/拟饵钓组（Marine *Jig）：靠收线诱鱼，节奏按拟饵族走。
+	51: true, 52: true, 53: true, 54: true,
 }
 
 // defaultRigTypeForRod 按竿型选择第一个有资源名映射的允许钓组。
