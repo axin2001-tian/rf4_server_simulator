@@ -68,6 +68,7 @@ var categoryWireClass = map[int64]wireClassEntry{
 	54: {"gpldfemlfch", 612},   // 蜗杆轴
 	59: {"iknkgeomkip", 3200},  // Cobra 打窝器
 	60: {"ifnaghdaolg", 3201},  // Slingshot 弹弓
+	79: {"abmokghdbhf", 11500}, // 竿架/rod pod（f0 设置值 + f1 杆位数组，模型 pphmpibfgea）
 	81: {"dbjjakbbbfc", 12601}, // 扩展类别映射
 }
 
