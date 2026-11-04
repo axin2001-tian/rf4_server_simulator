@@ -955,39 +955,31 @@ func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 		}
 		return nil, true
 	}
-	if f0 == 5 {
-		// 鱼已脱钩离开（含断线跑鱼）：本轮作废，后续 14/4 不能再结算成渔获。
-		// 否则会出现"鱼线已断、鱼却进了护网"的错账。
-		ctx.Log.Info("14/12 鱼已脱钩离开", "f0", f0)
-		if st.biteTimer != nil {
-			st.biteTimer.Stop()
-		}
-		pending := st.Pending
-		st.Resolved = true
-		st.Pending = nil
-		st.CastActive = false
-		st.Hooked = false
-		st.mu.Unlock()
-		srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
-		srv.notifyFishEscape(ctx.Sess, pending, "脱钩")
-		return nil, true
-	}
 	if f0 == 6 {
-		// 新鱼已替换旧鱼：不重推，保持当前等待状态。
+		// 新鱼已替换旧鱼：保持当前等待状态，不重推也不重排。
 		ctx.Log.Info("14/12 鱼状态通知", "f0", f0)
 		st.mu.Unlock()
 		return nil, true
 	}
+	// f0=5 以及其它未列出的取值都表示"这条鱼已经不在了"（弃咬/脱钩/跑鱼）。
+	// 本轮的鱼作废，避免 14/4 把它结算成渔获；但只要饵还在水里，就继续排下一口，
+	// 玩家不用每次脱钩都重抛。实测客户端脱钩时上报的是 f0=8，不是 5。
 	if st.biteTimer != nil {
 		st.biteTimer.Stop()
 	}
 	pending := st.Pending
-	st.Resolved = true
 	st.Pending = nil
-	st.CastActive = false
+	st.Hooked = false
+	keepCast := st.CastActive && st.InWater
+	st.Resolved = !keepCast
+	st.CastActive = keepCast
 	st.mu.Unlock()
 	srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
-	srv.notifyFishEscape(ctx.Sess, pending, "脱钩离开")
+	srv.notifyFishEscape(ctx.Sess, pending, "脱钩")
+	if keepCast {
+		srv.scheduleBiteState(ctx.Sess, st, false, false)
+		ctx.Log.Info("14/12 脱钩后继续等咬钩", "f0", f0)
+	}
 	return nil, true
 }
 
