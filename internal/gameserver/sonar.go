@@ -220,7 +220,32 @@ func makeSonarEcho(sizeCM, depthM float64) (*proto.Value, error) {
 	})
 }
 
+// sonarValListMode 控制网格数组的编码形状：
+// false = args(code)（0x03 + code + 计数 + 元素），true = VAL 列表（0x01 + 哨兵 + 元素）。
+// 客户端自己的 14/8 上报用的是 VAL 列表，但服务端下发声呐时的形状还没确证，
+// 用运行参数 sonar_vallist 切换，便于在不重启进程的情况下对比两种编码。
+var sonarValListMode atomic.Bool
+
+// sonarDenseMode 诊断开关：每格都放一条回波，用来判断客户端是否真的渲染了
+// 服务端下发的数据（全格有回波仍然没鱼点，说明问题在数据形状而不是鱼群分布）。
+var sonarDenseMode atomic.Bool
+
+// sonarEchoValList 只把「格内回波数组」编码成 VAL 列表，外层网格仍用 args。
+// 用于区分两种数组形状到底是哪一层不对。
+var sonarEchoValList atomic.Bool
+
+// sonarPatternMode 诊断开关：整片网格只在正中格放一条大回波（50cm / 20m），
+// 其它格全空。用来确认客户端到底有没有渲染这份数据、以及渲染在哪个位置。
+var sonarPatternMode atomic.Bool
+
 func makeSonarCell(echoes []*proto.Value) (*proto.Value, error) {
+	if sonarValListMode.Load() || sonarEchoValList.Load() {
+		// 格内回波数组用 VAL 列表；空格也写成「空列表」而不是 null，
+		// 避免客户端把 null 当成偏移、整片网格错位。
+		return wiregen.MakeObj(sonarCellClass, map[int]*proto.Value{
+			0: proto.ValList(echoes...),
+		})
+	}
 	if len(echoes) == 0 {
 		// 空格必须用通用 null（0x00）。
 		// 客户端解码器没有 0xFF 分支——发 ElemNull 会让它抛
@@ -275,14 +300,27 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 	}
 
 	items := make([]*proto.Value, 0, cellCount)
+	dense := sonarDenseMode.Load()
+	pattern := sonarPatternMode.Load()
 	for idx := 0; idx < cellCount; idx++ {
 		var echoes []*proto.Value
 		echoCount := 0
-		if hot[idx] > 0 {
+		if pattern {
+			// 诊断用：只在中列固定深度放一条大回波，用来确认客户端是否渲染、
+			// 以及渲在哪个位置。其它格全空。
+			if idx == (rows/2)*cols+cols/2 {
+				echoCount = 1
+			}
+		} else if dense {
+			echoCount = 1 // 诊断用：每格都放一条回波，用来确认客户端是否真的在用这份数据
+		} else if hot[idx] > 0 {
 			echoCount = rng.Intn(4) + 1
 		}
 		for echoCount > 0 {
 			sizeCM, depthM := sampleSonarEcho(rng, profile)
+			if pattern {
+				sizeCM, depthM = 50, 20
+			}
 			echo, err := makeSonarEcho(sizeCM, depthM)
 			if err != nil {
 				return nil, err
@@ -297,6 +335,12 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 		items = append(items, cell)
 	}
 
+	if sonarValListMode.Load() {
+		return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
+			0: proto.StrVal(systemID),
+			1: proto.ValList(items...),
+		})
+	}
 	code := sonarCellArgCode
 	return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
 		0: proto.StrVal(systemID),
@@ -313,5 +357,10 @@ func (s *Server) sonarResponse(ctx context.Context, systemID string) (*proto.Val
 	if s.tunableF("sonar_echo", 0) < 1 {
 		return makeEmptySonarResponse(systemID)
 	}
+	sonarMode := s.tunableF("sonar_vallist", 0)
+	sonarValListMode.Store(sonarMode == 1)
+	sonarEchoValList.Store(sonarMode == 2)
+	sonarDenseMode.Store(s.tunableF("sonar_dense", 0) >= 1)
+	sonarPatternMode.Store(s.tunableF("sonar_pattern", 0) >= 1)
 	return synthesizeSonar(systemID, s.sonarProfileFor(ctx, systemID), newSonarRand())
 }

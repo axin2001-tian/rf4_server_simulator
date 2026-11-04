@@ -66,10 +66,11 @@ var categoryWireClass = map[int64]wireClassEntry{
 	52: {"ibinolcnogf", 610},
 	53: {"phdkhaocdai", 611},   // 齿轮 LED
 	54: {"gpldfemlfch", 612},   // 蜗杆轴
+	57: {"fmaajjlcdmc", 167},   // 铅芯线（leadcore，f0 线径/长度，DTO emfindpkead）
 	59: {"iknkgeomkip", 3200},  // Cobra 打窝器
 	60: {"ifnaghdaolg", 3201},  // Slingshot 弹弓
 	79: {"abmokghdbhf", 11500}, // 竿架/rod pod（f0 设置值 + f1 杆位数组，模型 pphmpibfgea）
-	81: {"dbjjakbbbfc", 12601}, // 扩展类别映射
+	81: {"kbpmmclfipg", 1470},  // 渔轮电机（装在轮 f14 扩展槽，DTO odlknjlbooh）
 }
 
 const fallbackWireClass = "ohciikgjghe"
@@ -720,6 +721,21 @@ func (s *Server) applyDefAttrs(def *store.ItemDef, class string, obj *proto.Valu
 	if err := json.Unmarshal([]byte(def.AttrsJSON), &attrs); err != nil {
 		return
 	}
+	// 渔轮电机（kbpmmclfipg/1470）的功率与最高速度在定义里叫
+	// afmboidbbaj / fgkfkgimfgo，wire 类字段叫 npnlhobgfen / mbbdpnidheg，
+	// 名字对不上，直接按别名映射；这两个值是 f32 位模式，走下面的 float 分支。
+	if class == "kbpmmclfipg" {
+		if v, ok := attrs["afmboidbbaj"]; ok {
+			if _, exists := attrs["npnlhobgfen"]; !exists {
+				attrs["npnlhobgfen"] = v
+			}
+		}
+		if v, ok := attrs["fgkfkgimfgo"]; ok {
+			if _, exists := attrs["mbbdpnidheg"]; !exists {
+				attrs["mbbdpnidheg"] = v
+			}
+		}
+	}
 	for cs, val := range attrs {
 		idx := fieldIdxByCS(class, cs)
 		if idx < 0 || idx >= len(obj.Fields) {
@@ -863,7 +879,8 @@ func netTicksNow() int64 {
 // guid、容器、数量、耐久和工艺保持不变。类别已经对上，或不是回退类时不改。
 func (s *Server) reclassifyStoredItem(ctx context.Context, it *store.Item, def *store.ItemDef) (bool, error) {
 	if it == nil || def == nil ||
-		(def.Category != 41 && def.Category != 42 && def.Category != 47 && def.Category != 79) {
+		(def.Category != 41 && def.Category != 42 && def.Category != 47 &&
+			def.Category != 57 && def.Category != 58 && def.Category != 79) {
 		return false, nil
 	}
 	cls, ok := categoryWireClass[def.Category]

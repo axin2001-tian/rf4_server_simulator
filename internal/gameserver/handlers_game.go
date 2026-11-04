@@ -329,16 +329,23 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 	cctx := ctx.Sess.pushCtx()
 	uid := ctx.Sess.Userid
 	if tier := placeBuyoutPrice(place, packet); tier > 0 && price == tier {
-		// 金币买断（百分位）：扣款 → 授予 → 流水
-		if p, err := srv.DB.EnsureProfile(cctx, uid); err == nil && p != nil {
-			_ = srv.DB.UpdateBalance(cctx, uid, p.Silver, p.Gold-tier, p.Bank)
+		// 金币买断（百分位）：先校验余额，不足不扣款也不授予。
+		p, err := srv.DB.EnsureProfile(cctx, uid)
+		if err == nil && p != nil && p.Gold < tier {
+			ctx.Log.Info("3/37 金币不足，不扣款", "place", place, "tier", packet,
+				"gold", p.Gold, "need", tier)
+		} else {
+			if err == nil && p != nil {
+				_ = srv.DB.UpdateBalance(cctx, uid, p.Silver, p.Gold-tier, p.Bank)
+			}
+			if err := srv.DB.PlaceAccessInsert(cctx, uid, place, "buyout"); err != nil {
+				ctx.Log.Warn("3/37 授予地点失败", "place", place, "err", err)
+			}
+			_ = srv.DB.AddTxn(cctx, uid, "buy", place, "", 0, -tier, "place_buyout")
+			ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
+				"gold", -tier, "gold_yuan", float64(tier)/100.0)
+			srv.grantPremiumBundle(cctx, ctx, uid, tier)
 		}
-		if err := srv.DB.PlaceAccessInsert(cctx, uid, place, "buyout"); err != nil {
-			ctx.Log.Warn("3/37 授予地点失败", "place", place, "err", err)
-		}
-		_ = srv.DB.AddTxn(cctx, uid, "buy", place, "", 0, -tier, "place_buyout")
-		ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
-			"gold", -tier, "gold_yuan", float64(tier)/100.0)
 	} else {
 		tiers, _ := placeBuyoutTiers[place]
 		ctx.Log.Info("3/37 价格与静态表不符，不扣款", "place", place,
@@ -358,6 +365,69 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 
 // parsePlaceBuyoutArgs 顶层 args 位置取参：[0]=place 字符串、[1]=packetId、
 // [2]=price（long）。缺参按零值处理（调用方走"价格不符"分支）。
+// premiumBundleItem 捆绑包里的单件物品与数量。
+type premiumBundleItem struct {
+	ItemID string
+	Qty    int64
+}
+
+// premiumBundleItems 捆绑包附赠物品：三个价位（基本 32.90 / 扩展 159.90 / 全 179.90）
+// 在客户端展示的清单相同。
+//
+// 说明：
+//   - 海鱼饵不整盒发（box_sea_baits 这套盒物品在本机客户端加载不出来，会卡"正在下载"），
+//     改为按盒内清单逐件发同款海饵，效果一致且都是能正常显示的物品；
+//   - 目录里没有的（Saltmaster SBH 88 鱼竿、Venga SBH 10000 渔轮、狼鳚港雕像）先不发；
+//   - 技能书（category 80）暂时也发不出来，等确定 wire 类型后再补。
+var premiumBundleItems = []premiumBundleItem{
+	{ItemID: "fb_lf_makrel", Qty: 1}, // 一套海鱼饵（盒内清单）
+	{ItemID: "fb_lf_saida", Qty: 1},
+	{ItemID: "fb_lf_seld", Qty: 1},
+	{ItemID: "fb_bf_makrel", Qty: 1},
+	{ItemID: "fb_bf_saida", Qty: 1},
+	{ItemID: "fb_bf_seld", Qty: 1},
+	{ItemID: "fb_shrimp", Qty: 1},
+	{ItemID: "fb_nereis", Qty: 1},
+	{ItemID: "ticket_boat_norw_sea_a_120", Qty: 10}, // 10 张 5 天租船票（120 小时）
+}
+
+// premiumBundlePrices 识别捆绑包的金币价（百分位）。
+var premiumBundlePrices = map[int64]string{
+	3290:  "基本捆绑包",
+	15990: "扩展捆绑包",
+	17990: "全捆绑包",
+}
+
+// grantPremiumBundle 在买断成功后按价格发放捆绑包附赠物品；不是捆绑包价格就跳过。
+// 背包槽位必须逐个分配：CreateItem 默认 slot=0，多件同槽会让客户端只显示一件。
+func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid, price int64) {
+	name, ok := premiumBundlePrices[price]
+	if !ok {
+		return
+	}
+	slot, err := s.DB.NextFreeSlot(ctx, uid, "backpack")
+	if err != nil {
+		c.Log.Warn("捆绑包发放取空槽失败", "bundle", name, "err", err)
+		return
+	}
+	granted := 0
+	for _, it := range premiumBundleItems {
+		row, err := s.CreateItem(ctx, uid, it.ItemID, "backpack", it.Qty)
+		if err != nil || row == nil {
+			c.Log.Warn("捆绑包物品发放失败", "bundle", name, "item", it.ItemID, "err", err)
+			continue
+		}
+		if err := s.DB.SetItemSlot(ctx, row.GUID, slot); err != nil {
+			c.Log.Warn("捆绑包物品槽位设置失败", "item", it.ItemID, "slot", slot, "err", err)
+		}
+		slot++
+		granted++
+	}
+	c.Log.Info("捆绑包附赠物品已发放", "bundle", name, "price", price,
+		"granted", granted, "total", len(premiumBundleItems))
+}
+
+// parsePlaceBuyoutArgs 从顶层 args 取 [place, packet, price]。
 func parsePlaceBuyoutArgs(tree *proto.Value) (place string, packet, price int64) {
 	if tree == nil || tree.Kind != proto.KindArgs {
 		return "", 0, 0
@@ -906,35 +976,28 @@ func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 		}
 		return nil, true
 	}
-	if f0 == 5 {
-		// 鱼已脱钩离开（含断线跑鱼）：本轮作废，后续 14/4 不能再结算成渔获。
-		// 否则会出现"鱼线已断、鱼却进了护网"的错账。
-		ctx.Log.Info("14/12 鱼已脱钩离开", "f0", f0)
-		if st.biteTimer != nil {
-			st.biteTimer.Stop()
-		}
-		st.Resolved = true
-		st.Pending = nil
-		st.CastActive = false
-		st.Hooked = false
-		st.mu.Unlock()
-		srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
-		return nil, true
-	}
+	// f0=6：新鱼已替换旧鱼，保持当前等待状态，不重推也不重排。
 	if f0 == 6 {
-		// 新鱼已替换旧鱼：不重推，保持当前等待状态。
-		ctx.Log.Info("14/12 鱼状态通知", "f0", f0)
 		st.mu.Unlock()
 		return nil, true
 	}
+	// f0=5 以及其它未列出的取值都表示"这条鱼已经不在了"（弃咬/脱钩/跑鱼）。
+	// 本轮的鱼作废，避免 14/4 把它结算成渔获；但饵还在水里时继续排下一口，
+	// 玩家不用每次脱钩都重抛。实测脱钩时客户端上报的是 f0=8，不是 5。
 	if st.biteTimer != nil {
 		st.biteTimer.Stop()
 	}
-	st.Resolved = true
 	st.Pending = nil
-	st.CastActive = false
+	st.Hooked = false
+	keepCast := st.CastActive && st.InWater
+	st.Resolved = !keepCast
+	st.CastActive = keepCast
 	st.mu.Unlock()
 	srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
+	if keepCast {
+		srv.scheduleBiteState(ctx.Sess, st, false, false)
+		ctx.Log.Info("14/12 脱钩后继续等咬钩", "f0", f0)
+	}
 	return nil, true
 }
 
@@ -944,7 +1007,9 @@ func hFishingLoad(ctx *Ctx) ([]byte, bool) {
 	st.mu.Lock()
 	st.Hooked = true
 	st.mu.Unlock()
-	ctx.Sess.Push4_22Full()
+	// 14/8 是客户端每 2 秒上报的钓组/渔轮状态（线长、曳力等）。这里不要再推
+	// 全量背包：4/22 会把渔轮字段刷回服务端保存的旧值，客户端电动收线的
+	// 本地进度每两秒被重置，表现为"能切电动但收不了线"。
 	return nil, true
 }
 

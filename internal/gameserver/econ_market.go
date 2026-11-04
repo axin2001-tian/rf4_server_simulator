@@ -38,6 +38,7 @@ func registerEconMarket(d *Dispatch) {
 	d.Register(21, 4, hWorkshopOrder) // 官方金币通道同样是换件结构
 	d.Register(17, 12, hRodSetDepth)
 	d.Register(17, 13, hRodSetClip)
+	d.Register(17, 15, hReelElectro)
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,6 +1792,26 @@ func hRodSetClip(ctx *Ctx) ([]byte, bool) {
 		_ = srv.DB.UpsertRodSetting(ctx.Sess.pushCtx(), rodGUID, reelClipSettingKey, strconv.FormatInt(clipM, 10))
 		if !srv.rodRigSetClip(ctx.Sess.pushCtx(), rodGUID, clipM) {
 			ctx.Log.Info("17/13 竿实例无钓组字段，仅记竿设置", "竿", shortGUID(rodGUID))
+		}
+	}
+	return nil, true
+}
+
+// hReelElectro 17/15（fire-and-forget）：电轮开关/档位上报。
+//
+// 报文形状与 17/13 相同：args(12) + 渔轮 guid + u32（实测 0x30/0x31/0x14）。
+// 客户端切到电动模式后只播电机音效、线不收，先记录取值并把渔轮实例推回一次，
+// 用来判断收线是否需要服务端确认。
+func hReelElectro(ctx *Ctx) ([]byte, bool) {
+	srv := ctx.Sess.Srv
+	reelGUID, value := parseRodGuidInt(ctx.Tree)
+	if reelGUID == "" {
+		return nil, true
+	}
+	ctx.Log.Info("17/15 电轮开关", "轮", shortGUID(reelGUID), "值", value)
+	if srv.DB != nil {
+		if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), reelGUID); err == nil && row != nil {
+			srv.pushItemUpdate(ctx.Sess.Userid, row)
 		}
 	}
 	return nil, true

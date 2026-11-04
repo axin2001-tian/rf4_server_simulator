@@ -286,9 +286,11 @@ func hStoreReturn(ctx *Ctx) ([]byte, bool) {
 	return body, true
 }
 
-// hStoreATMQuery 处理 22/6，固定返回 false 且不修改货币。
+// hStoreATMQuery 处理 22/6：买房子界面点一套房时客户端会发它请求房屋详情，
+// 之前固定回 0x0F（客户端不识别的布尔值），界面就一直停在"正在下载"。
+// 先回通用 null，让客户端按"没有详情"处理；真正的房屋对象结构待补。
 func hStoreATMQuery(ctx *Ctx) ([]byte, bool) {
-	return []byte{0x0F}, true
+	return []byte{0x00}, true
 }
 
 // treeStrs、treeInts 分别读取顶层 args 中的字符串和整数序列。

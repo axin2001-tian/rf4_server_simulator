@@ -25,8 +25,10 @@ var reelPartKeys = []string{
 // leaderPartKeys 保存前导子实例键：f1 钢丝、f2 配件；f3 没有嵌套配置。
 var leaderPartKeys = []string{"mbnambppbom", "lbadjgllglo", "baadhdmaonp"}
 
-// subUnbuildedKinds 列出暂不物化的子部件类型；当前包含 kind 81。
-var subUnbuildedKinds = map[float64]bool{81: true}
+// subUnbuildedKinds 列出暂不物化的子部件类型。当前为空：
+// 渔轮电机（kind 81）已确认是 kbpmmclfipg/1470，需要物化到轮 f14 扩展槽，
+// 客户端据此启用电动收线。
+var subUnbuildedKinds = map[float64]bool{}
 
 // subMountFlag 表示子部件已挂载到母物品。
 const subMountFlag = 1024

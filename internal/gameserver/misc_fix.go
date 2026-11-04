@@ -362,7 +362,7 @@ func hSocialCurrent(ctx *Ctx) ([]byte, bool) {
 }
 
 // hSocialMove 处理 24/1 social/move：客户端上报当前位置/频道
-//（上船、跨水域时发，参数是目标频道名，如 "nav12_02"）。
+// （上船、跨水域时发，参数是目标频道名，如 "nav12_02"）。
 //
 // 实测（2026-11-04，客户端 4.0.25034）：回完整的 godhiicbgng 频道对象会让
 // 客户端以约 16ms 间隔无限重发，最终 HermesConnection 报 communication error
@@ -392,7 +392,39 @@ func hSocialMove(ctx *Ctx) ([]byte, bool) {
 	if prevName != name {
 		ctx.Log.Info("24/1 social/move 记录频道", "channel", name, "from", prevName)
 	}
-	return []byte{0x00}, true
+	// 运行参数 social_move_obj 用于对比两种响应形状（0=null，1=频道对象）；
+	// 默认回 null，客户端只发一次。
+	srv := ctx.Sess.Srv
+	if srv == nil || srv.tunableF("social_move_obj", 0) < 1 {
+		return []byte{0x00}, true
+	}
+	users := int64(0)
+	srv.mu.Lock()
+	for _, sess := range srv.sessions {
+		if sess != nil && !sess.Closed() {
+			users++
+		}
+	}
+	srv.mu.Unlock()
+	if users < 1 {
+		users = 1
+	}
+	obj := wiregen.MustMakeObj("godhiicbgng", map[int]*proto.Value{
+		0: proto.StrVal(name),
+		1: proto.StrVal("公共频道"),
+		2: proto.StrVal(ch.Region),
+		3: proto.U32(uint32(users)),
+		4: proto.U32(0),
+		5: proto.Bool(false),
+		6: proto.Null(),
+		7: proto.U32(1),
+		8: proto.Bool(false),
+	})
+	body, err := proto.EncodeValue(obj, ctx.Sess.Table())
+	if err != nil {
+		return nil, false
+	}
+	return body, true
 }
 
 // hSocialPublic 处理 24/10 公聊，命令本身不返回响应。

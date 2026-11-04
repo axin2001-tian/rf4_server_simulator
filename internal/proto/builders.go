@@ -79,6 +79,12 @@ func Args524(items ...*Value) *Value {
 	return Args(&code, items...)
 }
 
+// ValList 0x01 + 哨兵：VAL 列表（元素依次编码，不带 code 与计数）。
+// 客户端自己的 14/8 上报用的就是这种形状，DTO 数组字段可优先尝试它。
+func ValList(items ...*Value) *Value {
+	return &Value{Kind: KindValList, Items: items}
+}
+
 // DictOf 0x02 字典。
 func DictOf(typeName string, pairs ...Pair) *Value {
 	return &Value{Kind: KindDict, TypeName: typeName, Pairs: pairs}

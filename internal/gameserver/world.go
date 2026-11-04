@@ -198,6 +198,8 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 	}
 	uid := ctx.Sess.Userid
 	cctx := ctx.Sess.pushCtx()
+	// bundleGrant 标记本次买断是否是捆绑包价位，事务提交后再发附赠物品。
+	bundleGrant := false
 	place, packet, price := parsePlaceBuyoutArgs(ctx.Tree)
 	tier := placeBuyoutPrice(place, packet)
 
@@ -231,6 +233,7 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 			}
 			ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
 				"gold", -tier, "gold_yuan", float64(tier)/100.0)
+			bundleGrant = true
 		}
 	} else if owned == 0 {
 		tiers, _ := placeBuyoutTiers[place]
@@ -240,6 +243,10 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 	if err := tx.Commit(); err != nil {
 		ctx.Log.Warn("3/37 事务提交失败", "err", err)
 		return nil, false
+	}
+	if bundleGrant {
+		// 捆绑包价位：提交成功后发放附赠物品（不在事务内，失败只记日志）。
+		srv.grantPremiumBundle(cctx, ctx, uid, tier)
 	}
 	p, err := srv.BuildProfile307(cctx, uid)
 	if err != nil {
