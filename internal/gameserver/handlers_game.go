@@ -2,6 +2,7 @@ package gameserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -344,7 +345,7 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 			_ = srv.DB.AddTxn(cctx, uid, "buy", place, "", 0, -tier, "place_buyout")
 			ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
 				"gold", -tier, "gold_yuan", float64(tier)/100.0)
-			srv.grantPremiumBundle(cctx, ctx, uid, tier)
+			srv.grantPremiumBundle(cctx, ctx, uid, place, tier)
 		}
 	} else {
 		tiers, _ := placeBuyoutTiers[place]
@@ -367,23 +368,52 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 // [2]=price（long）。缺参按零值处理（调用方走"价格不符"分支）。
 // premiumBundleItem 捆绑包里的单件物品与数量。
 type premiumBundleItem struct {
-	ItemID string
-	Qty    int64
+	ItemID string `json:"item_id"`
+	Qty    int64  `json:"qty"`
 }
 
-// premiumBundleItems 捆绑包附赠物品：三个价位（基本 32.90 / 扩展 159.90 / 全 179.90）
-// 在客户端展示的清单相同。
+// premiumBundleDef 一个地图的捆绑包档位：按（地图 + 价位）识别，
+// 不同地图的捆绑包内容和价格都不一样。
+type premiumBundleDef struct {
+	Place string              `json:"place"`
+	Price int64               `json:"price"`
+	Name  string              `json:"name"`
+	Items []premiumBundleItem `json:"items"`
+}
+
+// bundleDefsKVKey kv 表里保存捆绑包配置的键；改这个 JSON 即可热更新，不需要重启进程。
+const bundleDefsKVKey = "bundle_defs"
+
+// defaultPremiumBundleDefs 内置兜底：北海（level_012_north_sea）的三档捆绑包。
+// 库里没有 bundle_defs 时用它。
+var defaultPremiumBundleDefs = []premiumBundleDef{{
+	Place: "level_012_north_sea",
+	Price: 17990,
+	Name:  "全捆绑包",
+	Items: northSeaBundleItems,
+}, {
+	Place: "level_012_north_sea",
+	Price: 15990,
+	Name:  "扩展捆绑包",
+	Items: northSeaBundleItems,
+}, {
+	Place: "level_012_north_sea",
+	Price: 3290,
+	Name:  "基本捆绑包",
+	Items: northSeaBundleItems,
+}}
+
+// northSeaBundleItems 北海捆绑包附赠物品。
 //
 // 说明：
 //   - 海鱼饵不整盒发（box_sea_baits 这套盒物品在本机客户端加载不出来，会卡"正在下载"），
 //     改为按盒内清单逐件发同款海饵，效果一致且都是能正常显示的物品；
-//   - Saltmaster SBH 88 鱼竿在目录里的 id 是 pilkr_10208_fu88_sbtn（10410，category 3）；
+//   - Saltmaster SBH 88 鱼竿 id 是 pilkr_10208_fu88_sbtn（10410，category 3）；
+//   - Venga SBH 10000 渔轮 id 是 spin_5140_sbtn（13630，category 6）；
 //   - 技能书 seafish_book：category 80 的顶层物品类要按 wrapper ipdakkbfoja/13301 发，
 //     发成 13300（书目配置类）客户端会强转失败卡载入；
-//   - Venga SBH 10000 渔轮在目录里只有线杯/握丸，没有整轮定义，暂不发；
-//   - Venga SBH 10000 渔轮在目录里的 id 是 spin_5140_sbtn（13630，category 6）；
-//   - 狼鳚港雕像在目录里没有明确对应项，暂不发。
-var premiumBundleItems = []premiumBundleItem{
+//   - 狼鳚港雕像在目录里没有对应项，暂不发。
+var northSeaBundleItems = []premiumBundleItem{
 	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1}, // Saltmaster SBH 88 鱼竿
 	{ItemID: "spin_5140_sbtn", Qty: 1},        // Venga SBH 10000 渔轮
 	{ItemID: "seafish_book", Qty: 1},          // 书「海钓入门技能书」
@@ -398,19 +428,43 @@ var premiumBundleItems = []premiumBundleItem{
 	{ItemID: "ticket_boat_norw_sea_a_120", Qty: 10}, // 10 张 5 天租船票（120 小时）
 }
 
-// premiumBundlePrices 识别捆绑包的金币价（百分位）。
-var premiumBundlePrices = map[int64]string{
-	3290:  "基本捆绑包",
-	15990: "扩展捆绑包",
-	17990: "全捆绑包",
+// bundleDefs 读当前生效的捆绑包表：优先 kv.bundle_defs（可热更新），否则用内置兜底。
+func (s *Server) bundleDefs(ctx context.Context) []premiumBundleDef {
+	if s.DB != nil {
+		var raw string
+		if err := s.DB.SQL.QueryRowContext(ctx,
+			`SELECT v FROM kv WHERE k=?`, bundleDefsKVKey).Scan(&raw); err == nil && raw != "" {
+			var defs []premiumBundleDef
+			if json.Unmarshal([]byte(raw), &defs) == nil && len(defs) > 0 {
+				return defs
+			}
+		}
+	}
+	return defaultPremiumBundleDefs
 }
 
-// grantPremiumBundle 在买断成功后按价格发放捆绑包附赠物品；不是捆绑包价格就跳过。
+// grantPremiumBundle 在 3/37 买断成功后按（地图 + 价位）发放捆绑包附赠物品。
 // 背包槽位必须逐个分配：CreateItem 默认 slot=0，多件同槽会让客户端只显示一件。
-func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid, price int64) {
-	name, ok := premiumBundlePrices[price]
-	if !ok {
+func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid int64, place string, price int64) {
+	var hit *premiumBundleDef
+	for _, def := range s.bundleDefs(ctx) {
+		if def.Price != price {
+			continue
+		}
+		if def.Place != "" && def.Place != place {
+			continue
+		}
+		d := def
+		hit = &d
+		break
+	}
+	if hit == nil {
+		c.Log.Info("捆绑包未配置，跳过发放", "place", place, "price", price)
 		return
+	}
+	name := hit.Name
+	if name == "" {
+		name = place
 	}
 	slot, err := s.DB.NextFreeSlot(ctx, uid, "backpack")
 	if err != nil {
@@ -418,20 +472,25 @@ func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid, price int6
 		return
 	}
 	granted := 0
-	for _, it := range premiumBundleItems {
-		row, err := s.CreateItem(ctx, uid, it.ItemID, "backpack", it.Qty)
-		if err != nil || row == nil {
-			c.Log.Warn("捆绑包物品发放失败", "bundle", name, "item", it.ItemID, "err", err)
+	for _, it := range hit.Items {
+		row, gerr := s.CreateItem(ctx, uid, it.ItemID, "backpack", it.Qty)
+		if gerr != nil || row == nil {
+			c.Log.Warn("捆绑包物品发放失败", "bundle", name, "item", it.ItemID, "err", gerr)
 			continue
 		}
-		if err := s.DB.SetItemSlot(ctx, row.GUID, slot); err != nil {
-			c.Log.Warn("捆绑包物品槽位设置失败", "item", it.ItemID, "slot", slot, "err", err)
+		if serr := s.DB.SetItemSlot(ctx, row.GUID, slot); serr != nil {
+			c.Log.Warn("捆绑包物品槽位设置失败", "item", it.ItemID, "slot", slot, "err", serr)
 		}
 		slot++
 		granted++
+		if c.Sess != nil {
+			// 逐件推 4/22：客户端收到后会把物品加进背包（与邮件领取同一条通道），
+			// 不用重登，也不会像全量推送那样只更新战斗物品。
+			s.pushItemUpdate(c.Sess.Userid, row)
+		}
 	}
-	c.Log.Info("捆绑包附赠物品已发放", "bundle", name, "price", price,
-		"granted", granted, "total", len(premiumBundleItems))
+	c.Log.Info("捆绑包附赠物品已发放", "bundle", name, "place", place, "price", price,
+		"granted", granted, "total", len(hit.Items))
 }
 
 // parsePlaceBuyoutArgs 从顶层 args 取 [place, packet, price]。

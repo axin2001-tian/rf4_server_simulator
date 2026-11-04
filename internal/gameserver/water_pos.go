@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -118,5 +119,26 @@ func hPositionReport(ctx *Ctx) ([]byte, bool) {
 	st.PosZ = z
 	st.HasPos = true
 	st.mu.Unlock()
+	// 管理端改库后需要让客户端立刻看到新物品：在 kv 里放 push_items_once（逗号分隔的
+	// 物品 GUID），下一次位置上报就把这些物品逐件推给客户端（3/9 每 12 秒一发，不用重进）。
+	if srv := ctx.Sess.Srv; srv != nil && srv.DB != nil {
+		var raw string
+		err := srv.DB.SQL.QueryRowContext(ctx.Sess.pushCtx(),
+			`SELECT v FROM kv WHERE k='push_items_once'`).Scan(&raw)
+		if err == nil && raw != "" {
+			_, _ = srv.DB.SQL.ExecContext(ctx.Sess.pushCtx(),
+				`DELETE FROM kv WHERE k='push_items_once'`)
+			cctx := ctx.Sess.pushCtx()
+			for _, g := range strings.Split(raw, ",") {
+				g = strings.TrimSpace(g)
+				if g == "" {
+					continue
+				}
+				if row, rerr := srv.DB.GetItemByGUID(cctx, g); rerr == nil && row != nil {
+					srv.pushItemUpdate(ctx.Sess.Userid, row)
+				}
+			}
+		}
+	}
 	return nil, false
 }

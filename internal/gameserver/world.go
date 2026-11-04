@@ -246,7 +246,7 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 	}
 	if bundleGrant {
 		// 捆绑包价位：提交成功后发放附赠物品（不在事务内，失败只记日志）。
-		srv.grantPremiumBundle(cctx, ctx, uid, tier)
+		srv.grantPremiumBundle(cctx, ctx, uid, place, tier)
 	}
 	p, err := srv.BuildProfile307(cctx, uid)
 	if err != nil {
