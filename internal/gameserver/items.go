@@ -858,11 +858,12 @@ func netTicksNow() int64 {
 	return time.Now().UnixNano()/100 + 621_355_968_000_000_000
 }
 
-// reclassifyStoredItem 把误落成钓线类的物品改写成该类别自己的实例类。
-// 已购工具、材料和铃铛靠这一步恢复实例类型，不必重买。
-// guid、容器、数量、耐久和工艺保持不变。类别已经对上，或不是钓线回退类时不改。
+// reclassifyStoredItem 把误落成兜底类的物品改写成该类别自己的实例类。
+// 已购工具、材料、铃铛和竿架靠这一步恢复实例类型，不必重买。
+// guid、容器、数量、耐久和工艺保持不变。类别已经对上，或不是回退类时不改。
 func (s *Server) reclassifyStoredItem(ctx context.Context, it *store.Item, def *store.ItemDef) (bool, error) {
-	if it == nil || def == nil || (def.Category != 41 && def.Category != 42 && def.Category != 47) {
+	if it == nil || def == nil ||
+		(def.Category != 41 && def.Category != 42 && def.Category != 47 && def.Category != 79) {
 		return false, nil
 	}
 	cls, ok := categoryWireClass[def.Category]
