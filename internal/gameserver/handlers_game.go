@@ -378,11 +378,13 @@ type premiumBundleItem struct {
 //   - 海鱼饵不整盒发（box_sea_baits 这套盒物品在本机客户端加载不出来，会卡"正在下载"），
 //     改为按盒内清单逐件发同款海饵，效果一致且都是能正常显示的物品；
 //   - Saltmaster SBH 88 鱼竿在目录里的 id 是 pilkr_10208_fu88_sbtn（10410，category 3）；
+//   - 技能书 seafish_book：category 80 的顶层物品类要按 wrapper ipdakkbfoja/13301 发，
+//     发成 13300（书目配置类）客户端会强转失败卡载入；
 //   - Venga SBH 10000 渔轮在目录里只有线杯/握丸，没有整轮定义，暂不发；
-//   - 狼鳚港雕像在目录里没有明确对应项，暂不发；
-//   - 技能书（category 80）暂时也发不出来，等确定 wire 类型后再补。
+//   - 狼鳚港雕像在目录里没有明确对应项，暂不发。
 var premiumBundleItems = []premiumBundleItem{
 	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1}, // Saltmaster SBH 88 鱼竿
+	{ItemID: "seafish_book", Qty: 1},          // 书「海钓入门技能书」
 	{ItemID: "fb_lf_makrel", Qty: 1},          // 一套海鱼饵（盒内清单）
 	{ItemID: "fb_lf_saida", Qty: 1},
 	{ItemID: "fb_lf_seld", Qty: 1},
