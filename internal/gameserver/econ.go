@@ -31,6 +31,18 @@ var valueRates = map[vgKey][2]float64{
 
 // catchValue 计算渔获经验和展示用银价。
 // 银价只用于结算界面和 catch_log，不直接增加余额；银币在鱼市 20/2 卖鱼时入账。
+// trophyStars 上星（奖杯）记 1 星，上蓝（蓝冠）再额外记 1 星；普通鱼不加星。
+func trophyStars(grade int64) int64 {
+	switch {
+	case grade >= 4:
+		return 2
+	case grade >= 3:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func catchValue(species string, grade, weightG int64) (xp, silver int64) {
 	rate, ok := valueRates[vgKey{species, grade}]
 	xpRate, silverRate := 0.4, 0.0
@@ -109,6 +121,13 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		st.LastSkill = skillID
 		st.mu.Unlock()
 
+		// 上星/上蓝累计星级：先加星再构建档案，推送里就带新值。
+		if starGain := trophyStars(pending.Grade); starGain > 0 {
+			if _, serr := s.DB.SQL.ExecContext(cctx,
+				`UPDATE profile SET stars=stars+? WHERE uid=?`, starGain, uid); serr != nil {
+				ctx.Log.Warn("星级累计失败", "grade", pending.Grade, "err", serr)
+			}
+		}
 		stats813 = s.build813(cctx, uid, pending, prevBest, skillGain)
 		profileTree, _ = s.BuildProfile307(cctx, uid)
 		skill312 = s.buildSingleSkill312(cctx, uid, skillID)

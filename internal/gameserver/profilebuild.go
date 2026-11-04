@@ -154,7 +154,7 @@ func (s *Server) BuildProfile307(ctx context.Context, uid int64) (*proto.Value, 
 		13: BuildStats322(ctx, s.DB, p.UID),
 		14: proto.U32(0),
 		15: proto.U32(profileFlags),
-		16: proto.U32(1),
+		16: proto.U32(uint32(p.Stars)), // 星级：上星/上蓝累计
 		17: proto.StrVal(p.Email),
 		18: proto.U32(uint32(p.Role)),
 		19: proto.U64(uint64(p.Bank)),
