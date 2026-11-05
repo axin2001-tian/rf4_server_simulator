@@ -136,15 +136,6 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		skill312 = s.buildSingleSkill312(cctx, uid, skillID)
 	}
 
-	if hasFish && levelsGained > 0 {
-		s.grantLevelUps(cctx, ctx, uid, newLevel-levelsGained, newLevel)
-		pname := ""
-		if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
-			pname = pp.Name
-		}
-		s.pushLevelUp(ctx.Sess, newLevel, pname)
-	}
-
 	// 801（空竿也回完整 801，f0/f6/f7 = null）
 	f0 := proto.Null()
 	if hasFish {

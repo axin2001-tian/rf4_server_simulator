@@ -1276,7 +1276,7 @@ func (s *Session) Push14_14(f *RolledFish, hookGUID, gearGuid string) bool {
 		force = math.Max(0.5, math.Round(force*k*10000)/10000)
 	}
 	s.log.Info("14/14 发鱼",
-		"鱼种", f.Species, "重量_g", f.WeightG, "体力池", stamina,
+		"鱼种", f.Species, "重量_g", f.WeightG, "档位", f.Grade, "体力池", stamina,
 		"初始体力", initialStamina, "拉力", force)
 	return s.Push(14, 14, proto.Args524(
 		proto.Guid(gearGuid),

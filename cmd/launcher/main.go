@@ -589,7 +589,14 @@ func mustExePath() string {
 }
 
 func openBrowser(url string) {
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	// 以管理员权限启动时，用 rundll32 拉起浏览器会与已在普通权限下运行的
+	// Edge/Chrome 实例冲突（弹"未响应，是否用普通权限重启"），因此直接跳过，
+	// 由面板日志给出访问地址，玩家可手动打开。
+	if os.Getenv("RF4_LAUNCHER_OPEN_BROWSER") == "1" {
+		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		return
+	}
+	panelLogger{}.Info("面板地址: " + url + "（浏览器未自动打开；如需自动打开请设置 RF4_LAUNCHER_OPEN_BROWSER=1）")
 }
 
 func showFatal(msg string, err error) {

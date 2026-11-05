@@ -139,10 +139,29 @@ func NeedsSeed(cfg *config.Config, staticPaths ...string) bool {
 	return NeedsSeedForSource(cfg, path)
 }
 
+// dbHasPlayerData 判断库里是否已有玩家物品（>=1 件即视为已初始化）。
+func dbHasPlayerData(path string) bool {
+	db, err := sql.Open("sqlite", sqliteReadOnlyURI(path))
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM item`).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 // NeedsSeedForSource 比较目标库与指定静态源库。
 func NeedsSeedForSource(cfg *config.Config, staticPath string) bool {
 	if _, err := os.Stat(cfg.SQLite.Path); err != nil {
 		return true
+	}
+	// 库里已有玩家数据（物品非空）时不再重新导入静态配置：
+	// 导入会整表重写静态表，对已经游玩的存档既无必要也有覆盖风险。
+	if dbHasPlayerData(cfg.SQLite.Path) {
+		return false
 	}
 	source, err := inspectStatic(staticPath)
 	if err != nil {

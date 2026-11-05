@@ -1006,6 +1006,18 @@ func (s *Server) reclassifyStoredItem(ctx context.Context, it *store.Item, def *
 // CreateItem 按 itemID 创建新实例并入包，返回数据库行。
 // 查不到定义时返回错误，由调用方处理退款。
 func (s *Server) CreateItem(ctx context.Context, uid int64, itemID, container string, units int64) (*store.Item, error) {
+	// 背包槽位上限保护：客户端对一次性渲染的物品行数有上限（实测 200+ 件时背包会
+	// 全部显示"正在下载"）。超限的新物品落进 stash 容器，客户端不渲染但数据保留。
+	if container == "backpack" && s.DB != nil {
+		limit := int64(s.tunableF("backpack_slot_limit", 150))
+		if limit > 0 {
+			var n int64
+			if err := s.DB.SQL.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM item WHERE uid=? AND container='backpack'`, uid).Scan(&n); err == nil && n >= limit {
+				container = "stash"
+			}
+		}
+	}
 	def, err := s.DB.GetItemDefByItemID(ctx, itemID)
 	if err != nil || def == nil {
 		return nil, fmt.Errorf("物品定义不存在: %s", itemID)
