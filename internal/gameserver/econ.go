@@ -107,9 +107,21 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		bonusXp := s.tunableF("xp_gain", 1.0)
 		xp = int64(math.Round(float64(xp) * bonusXp))
 		prevBest, _ := s.DB.CatchLogMaxWeight(cctx, uid, pending.Species)
+		oldLevel := int64(1)
+		if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
+			oldLevel = pp.Level
+		}
 		newLevel, _, gained := s.grantXp(cctx, uid, xp)
 		levelsGained = gained
 		prevLevel = max64(1, newLevel-1)
+		if gained > 0 {
+			s.grantLevelUps(cctx, ctx, uid, oldLevel, newLevel)
+			pname := ""
+			if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
+				pname = pp.Name
+			}
+			s.pushLevelUp(ctx.Sess, newLevel, pname)
+		}
 		// 按实际钓组大类增长；概率随当前熟练度反比下降，满熟练度不再增加。
 		skillID, skillGain := s.awardFishingProficiency(cctx, uid, rigType)
 		// catch_log 只在 14/5 入护时写入；14/4 放生的鱼不进入统计和纪录。
@@ -434,11 +446,21 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 		ratio := s.tunableF("release_xp_ratio", 0.5)
 		bonus := int64(math.Round(float64(base) * ratio))
 		if bonus > 0 {
+			oldLevel2 := int64(1)
+			if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
+				oldLevel2 = pp.Level
+			}
 			newLevel, _, gained := s.grantXp(cctx, uid, bonus)
 			ctx.Sess.Push2_9(100, uint64(bonus))
 			ctx.Sess.Push2_1()
 			if gained > 0 {
 				ctx.Sess.Push2_6(max64(1, newLevel-1))
+				s.grantLevelUps(cctx, ctx, uid, oldLevel2, newLevel)
+				pname := ""
+				if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
+					pname = pp.Name
+				}
+				s.pushLevelUp(ctx.Sess, newLevel, pname)
 			}
 		}
 	}
