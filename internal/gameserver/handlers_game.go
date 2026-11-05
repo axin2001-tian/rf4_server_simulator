@@ -54,6 +54,11 @@ func hItemCount(ctx *Ctx) ([]byte, bool) {
 	switch container {
 	case containerBackpack:
 		used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, []string{"backpack", "rig"})
+		// 背包容量由服务端下发；默认 300，可用 backpack_capacity 调整。
+		// 客户端按该容量渲染背包格子，容量越小越早出现"正在下载"。
+		if v := int64(srv.tunableF("backpack_capacity", 300)); v > 0 {
+			cap, capMember = v, v
+		}
 	case containerKeepnet:
 		srv.retryCompletedCatchRecovery(ctx.Sess)
 		n, err := srv.DB.KeepnetList(cctx, ctx.Sess.Userid)
@@ -989,7 +994,16 @@ func hFishingHooked(ctx *Ctx) ([]byte, bool) {
 	if pending == nil && !resolved && castActive {
 		srv.scheduleBiteForHooked(ctx.Sess, st)
 	}
-	ctx.Sess.Push4_22Hook()
+	// 海钓族是 RigMarineBase 的多段连接链，缺一段 RigConnector 就建不起来，
+	// 客户端会停在"连接器为空 → 负载恒 0 → 力度条空"。这类钓组在 14/11 就补齐
+	// 完整竿/线快照，不能等 14/8（负载快照要等客户端先算得出负载才会发）。
+	if gear != "" && marineRigType(srv.rigTypeForWrite(ctx.Sess.pushCtx(), gear)) {
+		ctx.Sess.Push4_22Full()
+	}
+	// 钩同步必须用本尾鱼实际中钩的 GUID（与 14/14.f23 同源）。
+	// 多钩/多拟饵钓组上客户端按 f23 查找钩实例，GUID 对不上会导致钩强状态缺失，
+	// 表现为海竿力度条恒空、提杆被钳制、负载峰值不触发 14/9。
+	ctx.Sess.Push4_22Hook(srv.pendingHookGUID(ctx.Sess.Userid))
 	return nil, true
 }
 

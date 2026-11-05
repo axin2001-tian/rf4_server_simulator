@@ -150,6 +150,73 @@ func (s *Server) itemBrokenForMount(ctx context.Context, row *store.Item) bool {
 	return s.itemLength(ctx, row) <= 0
 }
 
+// keepMountedBaitRemainderTx 断线时只损失钩上那一份饵。
+// 整包装填（baitFullStackRigTypes）把整堆搬进挂载子实例，直接按组件删除
+// 会让整堆饵陪葬。这里把剩余份数退回背包：
+//   - 背包已有同类堆：并进去，子实例删除（返回 false，调用方照常记损失）；
+//   - 背包没有同类堆：把这行改回背包行（返回 true，调用方跳过删除）。
+func (s *Server) keepMountedBaitRemainderTx(ctx context.Context, tx *sql.Tx, row *store.Item) (bool, error) {
+	if row == nil || row.Qty <= 1 {
+		return false, nil
+	}
+	def, derr := itemDefByNumericIDTx(ctx, tx, row.NumericID)
+	if derr != nil || def == nil || def.Category != catBait {
+		return false, nil
+	}
+	rest := row.Qty - 1
+	if rest <= 0 {
+		return false, nil
+	}
+	var stackGUID, stackFields string
+	var stackQty int64
+	err := tx.QueryRowContext(ctx, `SELECT guid, fields_json, qty FROM item
+		WHERE uid=? AND container='backpack' AND numeric_id=? AND guid<>?
+		ORDER BY slot, created_ts, guid LIMIT 1`,
+		row.UID, row.NumericID, row.GUID).Scan(&stackGUID, &stackFields, &stackQty)
+	switch {
+	case err == nil:
+		fields, ferr := FieldsFromJSON(stackFields)
+		if ferr != nil {
+			return false, ferr
+		}
+		if q := fieldIdxByCS(row.WireClass, csQty); q >= 0 && q < len(fields) {
+			fields[q].Num = ptrU64(uint64(stackQty + rest))
+		}
+		fj, jerr := FieldsToJSON(fields)
+		if jerr != nil {
+			return false, jerr
+		}
+		if _, uerr := tx.ExecContext(ctx,
+			`UPDATE item SET fields_json=?, qty=? WHERE guid=?`,
+			fj, stackQty+rest, stackGUID); uerr != nil {
+			return false, uerr
+		}
+		s.log.Info("断线退回饵堆", "bait", row.ItemID, "to", shortGUID(stackGUID), "qty", rest)
+		return false, nil // 子实例仍要删除，调用方继续走记录/删除
+	case errors.Is(err, sql.ErrNoRows):
+		fields, ferr := FieldsFromJSON(row.FieldsJSON)
+		if ferr != nil {
+			return false, ferr
+		}
+		clearRigFieldsForBackpack(fields, row.WireClass)
+		if q := fieldIdxByCS(row.WireClass, csQty); q >= 0 && q < len(fields) {
+			fields[q].Num = ptrU64(uint64(rest))
+		}
+		fj, jerr := FieldsToJSON(fields)
+		if jerr != nil {
+			return false, jerr
+		}
+		if _, uerr := tx.ExecContext(ctx, `UPDATE item
+			SET container='backpack', slot=0, rig_guid=NULL, qty=?, fields_json=?
+			WHERE guid=?`, rest, fj, row.GUID); uerr != nil {
+			return false, uerr
+		}
+		s.log.Info("断线退回饵堆", "bait", row.ItemID, "qty", rest, "kept_guid", shortGUID(row.GUID))
+		return true, nil
+	}
+	return false, err
+}
+
 // breakLineOrRod 处理 17/9：客户端只负责报告“已经超载”，承力件（竿、主线、
 // 子线、轮）由服务端重新比较真实强度决定断哪一件，不能直接相信客户端上报的
 // 断件。终端件（钩/拟饵/饵/漂）不承力，客户端上报的断裂直接采信。
@@ -633,6 +700,13 @@ func (s *Server) breakLineTx(ctx context.Context, uid int64, rodGUID, brokenGUID
 	}
 
 	for guid, row := range terminalRows {
+		// 整包装填会把整堆饵搬进挂载子实例，直接按组件删除等于让整堆饵陪葬。
+		// 断线只该损失钩上那一份，其余退回背包（有同类堆就并回去）。
+		if keptInBag, kerr := s.keepMountedBaitRemainderTx(ctx, tx, row); kerr != nil {
+			return nil, kerr
+		} else if keptInBag {
+			continue
+		}
 		if err := s.DB.DeleteItemCascadeTx(ctx, tx, guid); err != nil {
 			return nil, err
 		}

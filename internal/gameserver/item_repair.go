@@ -162,8 +162,117 @@ func (s *Server) RepairItemPhysics(ctx context.Context) error {
 	if err := s.DB.KVSet(ctx, itemPhysicsRepairKey, marker); err != nil {
 		return fmt.Errorf("物品物理状态修复：写完成标记: %w", err)
 	}
+	// 清理悬空钓组组件：装配过的零件被删除/回档后，rig_component 与竿的 f5 里
+	// 仍会留着它们的 guid。客户端按 f5 逐行解析零件，遇到查不到的实例会
+	// 拒绝整条钓组链，表现是收到 14/14 后用 14/12 f0=6 拒收鱼实体。
+	existing := make(map[string]bool, len(guids))
+	for _, g := range guids {
+		existing[g] = true
+	}
+	deadRows, prunedRods, perr := s.pruneDanglingRigComponents(ctx, existing)
+	if perr != nil {
+		return fmt.Errorf("物品物理状态修复：清理悬空组件: %w", perr)
+	}
+	if deadRows > 0 || prunedRods > 0 {
+		s.log.Info("钓组悬空组件已清理", "component_rows", deadRows, "rod_trees", prunedRods)
+	}
 	s.log.Info("物品物理状态修复完成", "version", itemPhysicsRepairVersion,
 		"items_changed", changed, "rods_repaired", rigsRepaired,
 		"quarantined", quarantined, "total", len(guids))
 	return nil
+}
+
+// pruneDanglingRigComponents 删除指向不存在物品的钓组组件行，并从竿的 f5
+// 快照里摘掉对应条目。返回删掉的行数与改写的竿树数。
+func (s *Server) pruneDanglingRigComponents(ctx context.Context, existing map[string]bool) (int, int, error) {
+	type compKey struct {
+		rig  string
+		slot int64
+		ord  int64
+		guid string
+	}
+	rows, err := s.DB.SQL.QueryContext(ctx,
+		`SELECT rig_guid, slot, ordinal, guid FROM rig_component`)
+	if err != nil {
+		return 0, 0, err
+	}
+	var dead []compKey
+	for rows.Next() {
+		var k compKey
+		if err := rows.Scan(&k.rig, &k.slot, &k.ord, &k.guid); err != nil {
+			_ = rows.Close()
+			return 0, 0, err
+		}
+		if !existing[k.guid] {
+			dead = append(dead, k)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	removed := 0
+	for _, k := range dead {
+		if _, err := s.DB.SQL.ExecContext(ctx,
+			`DELETE FROM rig_component WHERE rig_guid=? AND slot=? AND ordinal=? AND guid=?`,
+			k.rig, k.slot, k.ord, k.guid); err != nil {
+			return removed, 0, err
+		}
+		removed++
+	}
+
+	prunedRods := 0
+	for guid := range existing {
+		it, ierr := s.DB.GetItemByGUID(ctx, guid)
+		if ierr != nil || it == nil || it.WireClass != "cnolibojkao" {
+			continue
+		}
+		fields, ferr := FieldsFromJSON(it.FieldsJSON)
+		if ferr != nil {
+			continue
+		}
+		idx := fieldIdxByCS(it.WireClass, csRigObject)
+		if idx < 0 || idx >= len(fields) || fields[idx].Val == nil {
+			continue
+		}
+		rig := fields[idx].Val
+		if rig.FieldCount() <= 2 {
+			continue
+		}
+		arr := rig.Field(2).Val
+		if arr == nil || len(arr.Items) == 0 {
+			continue
+		}
+		kept := arr.Items[:0]
+		dropped := 0
+		for _, comp := range arr.Items {
+			if comp == nil || comp.FieldCount() < 2 {
+				kept = append(kept, comp)
+				continue
+			}
+			f1 := comp.Field(1)
+			g := f1.GuidHex()
+			if g == "" || existing[g] {
+				kept = append(kept, comp)
+				continue
+			}
+			dropped++
+		}
+		if dropped == 0 {
+			continue
+		}
+		arr.Items = kept
+		fj, jerr := FieldsToJSON(fields)
+		if jerr != nil {
+			continue
+		}
+		if uerr := s.DB.UpdateItemFields(ctx, it.GUID, fj, it.Qty,
+			it.Durability, it.Workmanship, it.RigGUID); uerr != nil {
+			continue
+		}
+		prunedRods++
+	}
+	return removed, prunedRods, nil
 }

@@ -44,6 +44,8 @@ type FishState struct {
 	LastAnim       uint32 // 14/7 f5 上一次的动画位（仅在变更时打日志）
 	PushSent       bool
 	pushing        *RolledFish // 仅进程内：防止同一尾鱼并发重推
+	lastPushGUID   string      // 最近一尾已下发的鱼（防同一条竿出现两尾在途）
+	lastPushAt     time.Time
 	Hooked         bool
 	Resolved       bool
 	Pending        *RolledFish
@@ -463,7 +465,19 @@ func (s *Server) rollFishForRig(ctx context.Context, uid int64, gearGUID, loc, b
 		if capKg > 0 {
 			s.log.Info("钓鱼物理上限", "rod", ids.Rod, "reel", ids.Reel, "line", ids.Line, "leader", ids.Leader, "weakest", weakest, "cap_kg", capKg)
 		}
-		return s.rollFishWithRules(loc, bait, capKg, bonus, c)
+		f := s.rollFishWithRules(loc, bait, capKg, bonus, c)
+		// 裸钩钓组（只有独立钩、没有饵/拟饵组件）不会进 baitedHookSets 分组，
+		// 走到这里 HookGUID 是空的。留空会让 27.f23 回退成鱼自身 GUID，
+		// 客户端按 f23 找不到钩实例就拒收鱼实体（14/12 f0=6），
+		// 表现就是海竿力度条恒空、抬不动杆。海钓族必须补上真实钩 GUID。
+		if f != nil && f.HookGUID == "" && marineRigType(rigType) {
+			if hook := s.mountedHookGuid(ctx, gearGUID); hook != "" {
+				f.HookGUID = hook
+				s.log.Info("裸钩钓组绑定 f23", "rod", shortGUID(gearGUID),
+					"hook", shortGUID(hook), "rig", rigType)
+			}
+		}
+		return f
 	}
 	spec := s.loadGearSpecForRig(ctx, ids, gearGUID)
 	rand.Shuffle(len(groups), func(i, j int) { groups[i], groups[j] = groups[j], groups[i] })
@@ -1277,7 +1291,7 @@ func (s *Session) Push14_14(f *RolledFish, hookGUID, gearGuid string) bool {
 	}
 	s.log.Info("14/14 发鱼",
 		"鱼种", f.Species, "重量_g", f.WeightG, "档位", f.Grade, "体力池", stamina,
-		"初始体力", initialStamina, "拉力", force)
+		"初始体力", initialStamina, "拉力", force, "f23钩", shortGUID(hookGUID))
 	return s.Push(14, 14, proto.Args524(
 		proto.Guid(gearGuid),
 		s.Srv.buildFish27(f, hookGUID, gearGuid),
@@ -1325,6 +1339,16 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	}
 	st.cancelBiteTimerLocked()
 	st.cancelPendingTimerLocked()
+	if st.Pending != nil || st.PushSent {
+		// 在途鱼被重排丢弃：会直接触发客户端 14/12 f0=6（同一条竿只允许一个钓鱼会话），
+		// 留一条日志便于定位是谁在咬钩窗口里重排。
+		fish := ""
+		if st.Pending != nil {
+			fish = shortGUID(st.Pending.FishGUID)
+		}
+		s.log.Info("咬钩重排丢弃在途鱼", "fish", fish,
+			"sent", st.PushSent, "hooked", st.Hooked, "from", callerShort(2))
+	}
 	st.castGeneration++
 	st.pushing = nil
 	st.persist.recoverCompleted = false
@@ -1456,6 +1480,15 @@ func (s *Server) onBiteTimerTicket(uid int64, ticket fishingTimerTicket) {
 		st.mu.Unlock()
 		return
 	}
+	// 同一条竿在客户端只允许一个钓鱼会话：上一尾已经下发但还没被 14/11 确认时，
+	// 再判第二尾一定被 14/12 f0=6 拒收，而拒收会触发 6 秒重推死循环。
+	// 放在这里而不是 pushPendingBite 里，是为了不挡住 GM 武装和 6 秒重推路径。
+	if st.lastPushGUID != "" && !st.Hooked && time.Since(st.lastPushAt) < 3*time.Second {
+		st.mu.Unlock()
+		s.log.Info("丢弃并发第二尾鱼", "inflight", shortGUID(st.lastPushGUID),
+			"from", callerShort(2))
+		return
+	}
 	x, z, hasPos := st.CastPosX, st.CastPosZ, st.HasCastPos
 	if !hasPos {
 		x, z, hasPos = st.PosX, st.PosZ, st.HasPos
@@ -1523,9 +1556,14 @@ func (s *Server) pushPendingBite(sess *Session, st *FishState, f *RolledFish, ge
 		st.mu.Unlock()
 		return
 	}
+	// 同一条竿在客户端只允许一个钓鱼会话：上一尾已经下发但还没被 14/11 确认时，
+	// 再判第二尾一定被 14/12 f0=6 拒收，而拒收会触发 6 秒重推死循环。
 	st.pushing = f
 	st.persist.recoverPending = false
+	st.lastPushGUID = f.FishGUID
+	st.lastPushAt = time.Now()
 	st.mu.Unlock()
+	s.log.Info("14/14 推送", "fish", shortGUID(f.FishGUID), "from", callerShort(2))
 	sent := s.pushBaitedFish(sess, f, gear)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -1651,6 +1689,27 @@ func (s *Server) notifyFishLanded(sess *Session, f *RolledFish, newRecord bool) 
 	if s.tunableF("fish_tv_kv", 0) != 0 {
 		kv = fishTVKv(f.Species, f.WeightG)
 	}
+	// 没有 KV 参数时不能推模板：客户端会拿默认值把 27/25、27/26 渲染成
+	// “稀有鱼，0 克”。这种情况退回普通文本播报，至少鱼种和重量是对的。
+	label := ""
+	switch {
+	case f.Grade >= 4:
+		label = "超级稀有鱼"
+	case f.Grade == 3:
+		label = "稀有鱼"
+	case newRecord:
+		label = "新纪录"
+	}
+	if label != "" && kv == nil {
+		name := s.speciesZhName(s.dbCtx(), f.Species)
+		if name == "" {
+			name = f.Species
+		}
+		if name != "" {
+			sess.pushSystemChat(fmt.Sprintf("%s：%s %s", label, name, formatWeightG(f.WeightG)))
+			return
+		}
+	}
 	switch {
 	case f.Grade >= 4:
 		sess.pushChatProbe(27, 25, "", kv) // 超级稀有鱼 X 千克
@@ -1663,7 +1722,12 @@ func (s *Server) notifyFishLanded(sess *Session, f *RolledFish, newRecord bool) 
 
 // notifyFishKept 入护播报。
 func (s *Server) notifyFishKept(sess *Session, f *RolledFish) {
-	if sess == nil {
+	if sess == nil || f == nil {
+		return
+	}
+	// 奖杯/蓝冠在 14/4 已用官方黄色模板播报过（含鱼种与重量），
+	// 这里不再补一条白色的“入护”，否则同一条鱼会在频道里刷两行。
+	if f.Grade >= 3 {
 		return
 	}
 	if text := s.fishKeptText(f); text != "" {

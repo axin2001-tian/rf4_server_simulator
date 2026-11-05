@@ -512,6 +512,8 @@ func (s *Session) pushChatRaw(variant, kind int, text string) {
 }
 
 // fishTVKv 构造 401.f4 的鱼名和重量参数。
+// 官方模板（面板 kv_shape=30 探测确认）是 KV 数组：键1=鱼种key、
+// 键2=重量克、键6=榜单类型（字符串）。缺键 6 时模板渲染出来是空档位。
 func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	if fishKey == "" {
 		fishKey = "g_tench"
@@ -522,6 +524,7 @@ func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	return proto.KVList(
 		proto.KVEntry{Key: 1, Val: proto.StrVal(fishKey)},
 		proto.KVEntry{Key: 2, Val: proto.U32(uint32(weightG))},
+		proto.KVEntry{Key: 6, Val: proto.StrVal("0")},
 	)
 }
 

@@ -166,21 +166,7 @@ func (s *Server) buildFightCurves(species string, pull float64) *proto.Value {
 // buildFightItems 构造 4/22 物品同步元素：full 返回竿和线，非 full 返回钩。
 // 14/11 以钩强 f0 作为负载比基准，因此非 full 分支不能返回竿树。
 func (s *Server) buildFightItems(ctx context.Context, uid int64, full bool) ([]*proto.Value, error) {
-	st := s.stateFor(uid)
-	st.mu.Lock()
-	gear := st.GearGuid
-	st.mu.Unlock()
-	if gear == "" {
-		// 无手持竿：取背包第一件竿
-		guids, _ := s.DB.ItemGUIDsByContainers(ctx, uid, []string{"backpack", "rig"})
-		for _, g := range guids {
-			row, err := s.DB.GetItemByGUID(ctx, g)
-			if err == nil && row.WireClass == "cnolibojkao" {
-				gear = g
-				break
-			}
-		}
-	}
+	gear := s.fightGearGUID(ctx, uid)
 	if gear == "" {
 		return nil, nil
 	}
@@ -210,6 +196,85 @@ func (s *Server) buildFightItems(ctx context.Context, uid int64, full bool) ([]*
 		}
 	}
 	return out, nil
+}
+
+// fightGearGUID 返回当前手持竿；没有手持时回退到背包/钓组里的第一根竿。
+func (s *Server) fightGearGUID(ctx context.Context, uid int64) string {
+	st := s.stateFor(uid)
+	st.mu.Lock()
+	gear := st.GearGuid
+	st.mu.Unlock()
+	if gear != "" {
+		return gear
+	}
+	guids, _ := s.DB.ItemGUIDsByContainers(ctx, uid, []string{"backpack", "rig"})
+	for _, g := range guids {
+		row, err := s.DB.GetItemByGUID(ctx, g)
+		if err == nil && row != nil && row.WireClass == "cnolibojkao" {
+			return g
+		}
+	}
+	return ""
+}
+
+// pendingHookGUID 返回本尾鱼实际中钩的钩 GUID（14/14.f23 的同源值）。
+func (s *Server) pendingHookGUID(uid int64) string {
+	st := s.stateFor(uid)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.Pending == nil {
+		return ""
+	}
+	return st.Pending.HookGUID
+}
+
+// buildHookSyncItems 构造 14/11 的 4/22 钩同步。
+// 多钩/多拟饵钓组上这一尾鱼可能咬的是第二、第三颗钩，必须按 f23 指定的
+// 钩 GUID 取实例；取不到时才回退到"当前挂载钩"。
+func (s *Server) buildHookSyncItems(ctx context.Context, uid int64, hookGUID string) []*proto.Value {
+	gear := s.fightGearGUID(ctx, uid)
+	if tree := s.buildHookTreeByGUID(ctx, uid, gear, hookGUID); tree != nil {
+		return []*proto.Value{tree}
+	}
+	return nil
+}
+
+// buildHookTreeByGUID 按指定钩 GUID 构造钩实例树。
+// 顺序：钩独立物品行 → 钓组里各拟饵实例的出厂钩子对象 → 当前挂载钩。
+func (s *Server) buildHookTreeByGUID(ctx context.Context, uid int64, gear, hookGUID string) *proto.Value {
+	hookGUID = strings.TrimSpace(hookGUID)
+	if hookGUID == "" {
+		return s.buildMountedHookTree(ctx, gear)
+	}
+	if row, err := s.DB.GetItemByGUID(ctx, hookGUID); err == nil && row != nil && row.UID == uid {
+		if tree, terr := s.ItemToTree(ctx, row); terr == nil {
+			return tree
+		}
+	}
+	// 出厂钩没有独立行：在钓组内的拟饵实例里按 GUID 找子对象。
+	if rows, err := s.DB.ListItemsByContainers(ctx, uid, []string{"rig"}); err == nil {
+		for _, row := range rows {
+			// 只有带 args(60) 出厂钩数组的实例才可能命中，先按类粗筛省掉建树开销。
+			if row.WireClass != "ioombppcnlh" && row.WireClass != "fcdgfdomnjm" {
+				continue
+			}
+			tree, terr := s.ItemToTree(ctx, row)
+			if terr != nil || tree == nil || len(tree.Fields) == 0 || tree.Fields[0].Val == nil {
+				continue
+			}
+			for _, hook := range tree.Fields[0].Val.Items {
+				if hook == nil {
+					continue
+				}
+				for i := range hook.Fields {
+					if hook.Fields[i].Op == "GUID16" && strings.EqualFold(hook.Fields[i].Hex, hookGUID) {
+						return hook
+					}
+				}
+			}
+		}
+	}
+	return s.buildMountedHookTree(ctx, gear)
 }
 
 // buildMountedHookTree 返回线末端钩的完整实例树。

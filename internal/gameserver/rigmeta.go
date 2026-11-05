@@ -59,6 +59,10 @@ var rodDefaultRigType = map[int64]int64{
 	16: 55, // rig_MarineBottomClassic
 }
 
+// marineRigType 判断钓组类型是否属于海钓族（50..60，rig_Marine*）。
+// 海钓族走 RigMarineBase 的多段连接链，负载依赖整条组件链是否完整。
+func marineRigType(rt int64) bool { return rt >= 50 && rt <= 60 }
+
 // bottomRigTypes 沉底族（无浮漂槽、竿尖梢必需）。
 var bottomRigTypes = map[int64]bool{
 	12: true, 13: true, 14: true, 15: true, 16: true, 17: true, 18: true,

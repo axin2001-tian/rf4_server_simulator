@@ -350,9 +350,10 @@ func (s *Session) Push4_22Full() {
 }
 
 // Push4_22Hook 刺中后单钩同步：args("61")[131钩]。
-func (s *Session) Push4_22Hook() {
-	items, err := s.Srv.buildFightItems(s.pushCtx(), s.Userid, false)
-	if err != nil || len(items) == 0 {
+// hookGUID 必须是本尾鱼实际中钩的那一颗（14/14.f23）；空串才回退到当前挂载钩。
+func (s *Session) Push4_22Hook(hookGUID string) {
+	items := s.Srv.buildHookSyncItems(s.pushCtx(), s.Userid, hookGUID)
+	if len(items) == 0 {
 		return
 	}
 	s.Push(4, 22, proto.Args(proto.S("61"), items...))

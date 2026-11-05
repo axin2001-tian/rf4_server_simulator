@@ -129,11 +129,17 @@ func TestWeakestLeaderBreaksAndKeepsMainLine(t *testing.T) {
 		t.Fatal("断子线后上方浮漂应保留")
 	}
 
-	for _, slot := range []int64{catHook, catLead, catWireLeader, catBait} {
+	for _, slot := range []int64{catHook, catLead, catWireLeader} {
 		if guid := comps[slot]; guid != "" {
 			if row, _ := db.GetItemByGUID(ctx, guid); row != nil {
 				t.Fatalf("断线后槽位 %d 的物品 %s 应被删除，实际仍存在", slot, guid)
 			}
+		}
+	}
+	// 整包装填的饵堆断线只损失钩上那一份，其余退回背包（不再整堆删除）。
+	if guid := comps[catBait]; guid != "" {
+		if row, _ := db.GetItemByGUID(ctx, guid); row != nil && row.Container != "backpack" {
+			t.Fatalf("断线后饵堆应退回背包，实际 container=%s qty=%d", row.Container, row.Qty)
 		}
 	}
 	if got := rigSlotGUIDs(t, srv, rod.GUID); got[catLine] != lineGUID {
@@ -154,8 +160,10 @@ func TestWeakestLeaderBreaksAndKeepsMainLine(t *testing.T) {
 	if counts[damageEventLineBreak] != 1 {
 		t.Fatalf("line_break 记录=%d，期望 1；全部=%v", counts[damageEventLineBreak], counts)
 	}
-	if counts[damageEventLostOnLineBreak] < 3 {
-		t.Fatalf("lost_on_line_break 记录=%d，期望至少 3；全部=%v", counts[damageEventLostOnLineBreak], counts)
+	// 终端件里的饵不再整堆记为丢失：断线只损失钩上那一份，其余退回背包，
+	// 所以丢失记录比"钩+铅+钢丝前导+饵"少一条。
+	if counts[damageEventLostOnLineBreak] < 2 {
+		t.Fatalf("lost_on_line_break 记录=%d，期望至少 2；全部=%v", counts[damageEventLostOnLineBreak], counts)
 	}
 	var lineBreaks int64
 	if err := db.SQL.QueryRow(`SELECT value FROM player_counters WHERE uid=? AND key='line_breaks'`, uid).Scan(&lineBreaks); err != nil || lineBreaks != 1 {
