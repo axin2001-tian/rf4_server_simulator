@@ -1038,7 +1038,8 @@ func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 		// 实机日志确认：1/2/8 会在鱼未中钩、钓组仍在水中时上报。
 		// 它们不代表收竿、断线或钓组离水；
 		// 旧逻辑把 CastActive 一并清掉，导致饵仍在水中却永远不再派鱼。
-		// 只清理当前鱼，并在同一水中钓组上重新安排下一次判鱼。
+		// 只清理当前鱼，并在同一水中钓组上重新安排下一次判鱼；
+		// 路亚脱钩同样重新排鱼，收线途中仍可能再次咬钩。
 		st.cancelBiteTimerLocked()
 		pending := st.Pending
 		alreadyResolved := st.Resolved

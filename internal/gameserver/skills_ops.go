@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 
@@ -89,10 +90,47 @@ func (s *Server) awardFishingProficiency(ctx context.Context, uid, rigType int64
 	return cat, s.awardSkillProficiency(ctx, uid, cat)
 }
 
+// rollSkillFloat 返回 [0,1) 随机数；测试可替换 Server.randFloat。
+func (s *Server) rollSkillFloat() float64 {
+	if s != nil && s.randFloat != nil {
+		return s.randFloat()
+	}
+	return rand.Float64()
+}
+
 // awardSkillProficiency 按指定技能大类增加熟练度。满熟练度不写库；
 // 接近上限时只增加剩余可容纳的数值。
 func (s *Server) awardSkillProficiency(ctx context.Context, uid, cat int64) float64 {
-	return s.awardSkillProficiencyWithRolls(ctx, uid, cat, rand.Float64(), rand.Float64())
+	return s.awardSkillProficiencyWithRolls(ctx, uid, cat, s.rollSkillFloat(), s.rollSkillFloat())
+}
+
+// awardCraftProficiency 按制作件数结算熟练度：每件独立判定，
+// 概率与钓鱼相同（熟练度越高越难涨），命中后加 0.1 或 0.2。
+func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int64) float64 {
+	if s == nil || s.DB == nil || cat <= 0 || items <= 0 {
+		return 0
+	}
+	current, err := s.DB.GetSkillPoints(ctx, uid, cat)
+	if err != nil {
+		return 0
+	}
+	gain := 0.0
+	for i := int64(0); i < items && current+gain < profCap; i++ {
+		if g := fishingProficiencyGainForRoll(current+gain, s.rollSkillFloat(), s.rollSkillFloat()); g > 0 {
+			gain += g
+		}
+	}
+	gain = math.Round(gain*10) / 10
+	if current+gain > profCap {
+		gain = profCap - current
+	}
+	if gain <= 1e-9 {
+		return 0
+	}
+	if err := s.DB.AddSkillPoints(ctx, uid, cat, gain); err != nil {
+		return 0
+	}
+	return gain
 }
 
 // awardSkillProficiencyWithRolls 允许测试注入随机数，实际写库仍复用同一概率公式。

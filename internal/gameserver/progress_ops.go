@@ -406,10 +406,8 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 	if hasFish && !res.replayed {
 		ctx.Sess.Push2_1()
 	}
-	// 收竿后立即补挂同种钩饵。客户端在空钩状态下不会发起下一次抛竿，
-	// 只把补饵留到 14/1/14/2 会让玩家每次上鱼后都必须手动换饵。
-	// 背包数量变化必须在 801 回包之后推送：在响应前推送会被客户端处理结算时丢弃，
-	// 表现为「钩上补上了饵，但背包里的蚯蚓数量没减」。
+	// 收竿时补挂同种库存，供客户端校验下一次抛竿；搏鱼中不补挂。
+	// 补挂后的钓组和背包数量在 801 响应发送后同步，避免结算覆盖数量更新。
 	if gearGUID != "" {
 		if change, rerr := s.reloadBaitForCast(cctx, uid, gearGUID); rerr != nil {
 			ctx.Log.Warn("收竿后补饵失败", "rod", shortGUID(gearGUID), "err", rerr)

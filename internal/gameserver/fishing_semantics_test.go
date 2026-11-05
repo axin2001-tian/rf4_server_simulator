@@ -283,6 +283,91 @@ func TestFishingLeftStatus1KeepsInWaterCastAndSchedulesNextFish(t *testing.T) {
 	}
 }
 
+func TestFishingLeftLureEscapeReschedulesBiteDuringRetrieve(t *testing.T) {
+	srv, _ := newDetachTestServer(t)
+	const uid = int64(1000001)
+	st := srv.stateFor(uid)
+	st.mu.Lock()
+	st.GearGuid = "33333333333333333333333333333333"
+	st.RigType = rigTypeLure
+	st.CastActive = true
+	st.InWater = true
+	st.Pending = &RolledFish{FishGUID: "88888888888888888888888888888888", Species: "c.roach"}
+	st.PushSent = true
+	st.Hooked = true
+	st.Resolved = false
+	st.mu.Unlock()
+
+	sess := newProbeSess(srv)
+	srv.sessions[sess.ID] = sess
+	t.Cleanup(func() { delete(srv.sessions, sess.ID) })
+
+	tree := proto.Args524(proto.Obj("lhicjpmglbo", 0, proto.Field{Op: "U32", Num: ptrU64(8)}))
+	if _, ok := hFishingLeft(&Ctx{Sess: sess, Main: 14, Sub: 12, Tree: tree, DecodeOK: true, Log: logging.Discard()}); !ok {
+		t.Fatal("14/12 未处理")
+	}
+
+	st.mu.Lock()
+	if !st.CastActive || !st.InWater {
+		st.mu.Unlock()
+		t.Fatalf("路亚脱钩后钓组仍在水中，本杆应继续: CastActive=%v InWater=%v", st.CastActive, st.InWater)
+	}
+	if st.Pending != nil || st.Hooked || st.Resolved || st.PushSent {
+		st.mu.Unlock()
+		t.Fatalf("脱钩后当前鱼状态未清干净: Pending=%+v Hooked=%v Resolved=%v PushSent=%v",
+			st.Pending, st.Hooked, st.Resolved, st.PushSent)
+	}
+	if st.biteTimer == nil || st.BiteAt.IsZero() {
+		st.mu.Unlock()
+		t.Fatal("路亚脱钩后收线途中应重新排咬钩")
+	}
+	st.biteTimer.Stop()
+	st.biteTimer = nil
+	st.mu.Unlock()
+
+	// 重连恢复同样可以补排，收线未结束不应丢窗口。
+	srv.resumeFishingState(st)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.biteTimer == nil {
+		t.Fatal("重连恢复后应继续排咬钩")
+	}
+	st.biteTimer.Stop()
+	st.biteTimer = nil
+}
+
+func TestFishingLeftLureMissStillSchedulesNextFish(t *testing.T) {
+	srv, _ := newDetachTestServer(t)
+	const uid = int64(1000001)
+	st := srv.stateFor(uid)
+	st.mu.Lock()
+	st.RigType = rigTypeLure
+	st.CastActive = true
+	st.InWater = true
+	st.Pending = &RolledFish{FishGUID: "99999999999999999999999999999999", Species: "c.roach"}
+	st.PushSent = true
+	st.Hooked = false
+	st.Resolved = false
+	st.mu.Unlock()
+
+	sess := newProbeSess(srv)
+	tree := proto.Args524(proto.Obj("lhicjpmglbo", 0, proto.Field{Op: "U32", Num: ptrU64(1)}))
+	if _, ok := hFishingLeft(&Ctx{Sess: sess, Main: 14, Sub: 12, Tree: tree, DecodeOK: true, Log: logging.Discard()}); !ok {
+		t.Fatal("14/12 未处理")
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.CastActive || !st.InWater {
+		t.Fatalf("未中钩的鱼离场后本杆应继续: CastActive=%v InWater=%v", st.CastActive, st.InWater)
+	}
+	if st.biteTimer == nil || st.BiteAt.IsZero() {
+		t.Fatal("未中钩的鱼离场后应继续排下一尾")
+	}
+	st.biteTimer.Stop()
+	st.biteTimer = nil
+}
+
 func TestMailInfoShapeAndGUID(t *testing.T) {
 	srv, _ := newDetachTestServer(t)
 	sess := newProbeSess(srv)

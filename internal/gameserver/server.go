@@ -79,6 +79,9 @@ type Server struct {
 	leaderWireLoaded bool
 	leaderWireDefs   []*store.ItemDef
 	leaderWireErr    error
+
+	// 测试注入的随机源；nil 时使用全局 rand。
+	randFloat func() float64
 }
 
 // NewServer 构建主服务器。
