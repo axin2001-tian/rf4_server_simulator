@@ -335,7 +335,7 @@ func (s *Server) handlePlayerDetail(w http.ResponseWriter, r *http.Request) {
 		"membership_active": store.MembershipAt(p.Membership, p.MembershipExp, time.Now().Unix()).Active,
 		"stars":             p.Stars, "email": p.Email,
 		"avatar": p.Avatar,
-		"role": p.Role, "banned": p.Banned,
+		"role":   p.Role, "banned": p.Banned,
 		"item_count": len(items), "keepnet_count": len(keepnet), "mail_count": len(mails),
 		"items": items, "keepnet": keepnet, "mails": mailRows, "skills": skills,
 		"skill_total": skillTotal, "skill_spent": skillSpent,

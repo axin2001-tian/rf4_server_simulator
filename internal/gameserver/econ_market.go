@@ -1812,7 +1812,7 @@ func hRodSetDrag(ctx *Ctx) ([]byte, bool) {
 	if srv.DB != nil {
 		_ = srv.DB.UpsertRodSetting(ctx.Sess.pushCtx(), rodGUID, reelDragSettingKey,
 			strconv.FormatInt(value, 10))
-		srv.rodRigSetDrag(ctx.Sess.pushCtx(), rodGUID, value)
+		// A/B：先不写回钓组桩，验证收线张力条是否恢复
 	}
 	return nil, true
 }

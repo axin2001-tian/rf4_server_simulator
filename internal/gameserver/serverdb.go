@@ -73,10 +73,46 @@ func (s *Server) loadFightCurves() {
 	}
 }
 
+// fightCurveRowCount 客户端要求 27.f21 固定为 26 行（空数组才会退回本地默认曲线）。
+const fightCurveRowCount = 26
+
+// fightCurveScaleMin/Max 缩放限幅：无对应曲线池的鱼按 crucian 基准缩放，
+// 大型鱼（如海图几百公斤级）会算出上千倍，客户端按该值画力度条会失真。
+const (
+	fightCurveScaleMin = 0.1
+	fightCurveScaleMax = 12.0
+)
+
+// fightCurvePoolAlias 把没有独立曲线池的鱼种映射到最接近的行为池。
+// 曲池里的 f0 是搏斗行为组，直接拿鲫鱼池喂鲤鱼/掠食鱼时行为组对不上，
+// 客户端画收线张力条会拿不到数据。
+func fightCurvePoolAlias(species string) string {
+	sp := strings.ToLower(species)
+	switch {
+	case strings.Contains(sp, "carp"):
+		return "c.carp"
+	case strings.Contains(sp, "perch"), strings.Contains(sp, "pike"),
+		strings.Contains(sp, "zander"), strings.Contains(sp, "bass"),
+		strings.Contains(sp, "asp"), strings.Contains(sp, "catfish"):
+		return "perch"
+	case strings.Contains(sp, "bream"), strings.Contains(sp, "cetorhinus"),
+		strings.Contains(sp, "shark"), strings.Contains(sp, "sturgeon"),
+		strings.Contains(sp, "zubatka"), strings.Contains(sp, "halibut"):
+		return "s.bream"
+	case strings.Contains(sp, "roach"), strings.Contains(sp, "rudd"),
+		strings.Contains(sp, "bleak"), strings.Contains(sp, "chub"):
+		return "c.roach"
+	}
+	return "crucian"
+}
+
 // buildFightCurves 构造 26 行曲线池，并按基础行 f8 缩放张力。
 func (s *Server) buildFightCurves(species string, pull float64) *proto.Value {
 	s.curveMu.Lock()
 	rows := s.curves[species]
+	if len(rows) == 0 {
+		rows = s.curves[fightCurvePoolAlias(species)]
+	}
 	if len(rows) == 0 {
 		rows = s.curves["crucian"]
 	}
@@ -91,7 +127,26 @@ func (s *Server) buildFightCurves(species string, pull float64) *proto.Value {
 	if baseTension > 0 {
 		scale = pull / baseTension
 	}
-	for _, r := range rows {
+	if scale < fightCurveScaleMin {
+		scale = fightCurveScaleMin
+	}
+	if scale > fightCurveScaleMax {
+		scale = fightCurveScaleMax
+	}
+	// 行数必须固定 26：不足时循环补齐，超出时截断。
+	pool := make([][19]float64, 0, fightCurveRowCount)
+	for i := 0; i < fightCurveRowCount; i++ {
+		pool = append(pool, rows[i%len(rows)])
+	}
+	if len(rows) >= fightCurveRowCount {
+		pool = pool[:0]
+		pool = append(pool, rows[:fightCurveRowCount]...)
+	}
+	if s.log != nil {
+		s.log.Info("搏鱼曲线下发", "species", species, "pool_rows", len(rows),
+			"sent_rows", len(pool), "base_tension", baseTension, "pull", pull, "scale", scale)
+	}
+	for _, r := range pool {
 		items := map[int]*proto.Value{0: proto.U32(uint32(r[0]))}
 		for i := 1; i <= 14; i++ {
 			v := r[i]
