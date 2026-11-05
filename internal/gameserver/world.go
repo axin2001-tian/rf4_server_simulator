@@ -2,6 +2,8 @@ package gameserver
 
 import (
 	"errors"
+	"strings"
+
 	"rf4server/internal/proto"
 	"rf4server/internal/wiregen"
 	"time"
@@ -59,6 +61,7 @@ func registerWorldHandlers(d *Dispatch) {
 	d.Register(4, 7, hItemRemove)
 	d.Register(4, 8, hItemUse)
 	d.Register(3, 37, hPlaceBuyoutTx)
+	d.Register(3, 33, hBuyHouseTx)
 }
 
 func hWorldSnapshot(ctx *Ctx) ([]byte, bool) {
@@ -111,25 +114,38 @@ func hItemMove(ctx *Ctx) ([]byte, bool) {
 }
 
 // hItemRemove 4/7：删除物品 → 回快照。
+// 载荷为 args("524")[容器枚举, GuidArr]。容器=5（鱼护）时目标是 keepnet
+// 表的回显 GUID（扔回水里），不在 item 表——按原路径静默无操作会让鱼护
+// 里的鱼扔不出去，需要分流到 KeepnetDelete。
 func hItemRemove(ctx *Ctx) ([]byte, bool) {
 	srv := ctx.Sess.Srv
 	if !srv.requireDB(ctx) {
 		return nil, false
 	}
 	guids := deepGUIDs(ctx.Tree)
-	owned := make([]string, 0, len(guids))
-	for _, g := range guids {
-		row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), g)
-		if err == nil && row != nil && row.UID == ctx.Sess.Userid {
-			owned = append(owned, g)
-		}
+	removed, fish, err := srv.DB.RemoveOwnedItems(ctx.Sess.pushCtx(), ctx.Sess.Userid, guids)
+	if err != nil {
+		ctx.Log.Warn("物品移除失败", "err", err)
+		ctx.ReplyFailure("System.IO.IOException", "物品未能移除，请重试")
+		return nil, true
 	}
-	if len(owned) > 0 {
-		if err := srv.DB.DeleteItems(ctx.Sess.pushCtx(), owned); err == nil {
-			// 4/21 = “这些物品已移除”推送；商店/邮件删物品也用它。
-			// 不推的话库里删干净了，客户端背包还留着，再点丢弃就是删不存在的 GUID。
-			ctx.Sess.Push4_21(owned)
+	if len(fish) > 0 {
+		st := srv.stateFor(ctx.Sess.Userid)
+		st.mu.Lock()
+		kept := st.Keepnet[:0]
+		for _, entry := range st.Keepnet {
+			if !containsGUID(fish, entry.FishGUID) {
+				kept = append(kept, entry)
+			}
 		}
+		st.Keepnet = kept
+		st.mu.Unlock()
+	}
+	if len(removed) > 0 {
+		ctx.Sess.Push4_21(removed)
+	}
+	if len(fish) > 0 {
+		srv.retryCompletedCatchRecovery(ctx.Sess)
 	}
 	return srv.rigSnapshot800(ctx), true
 }
@@ -139,6 +155,9 @@ func hItemUse(ctx *Ctx) ([]byte, bool) {
 	srv := ctx.Sess.Srv
 	if !srv.requireDB(ctx) {
 		return nil, false
+	}
+	if body, handled := srv.useAlcoholDrink(ctx); handled {
+		return body, true
 	}
 	guids := deepGUIDs(ctx.Tree)
 	out := proto.Args(proto.S("61"))
@@ -197,9 +216,9 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	uid := ctx.Sess.Userid
-	cctx := ctx.Sess.pushCtx()
-	// bundleGrant 标记本次买断是否是捆绑包价位，事务提交后再发附赠物品。
+	// bundleGrant 标记本次买断是否落在捆绑包价位，提交后再发附赠物品。
 	bundleGrant := false
+	cctx := ctx.Sess.pushCtx()
 	place, packet, price := parsePlaceBuyoutArgs(ctx.Tree)
 	tier := placeBuyoutPrice(place, packet)
 
@@ -233,8 +252,8 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 			}
 			ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
 				"gold", -tier, "gold_yuan", float64(tier)/100.0)
-			bundleGrant = true
 		}
+		bundleGrant = true
 	} else if owned == 0 {
 		tiers, _ := placeBuyoutTiers[place]
 		ctx.Log.Info("3/37 价格与静态表不符或未授权，不扣款", "place", place,
@@ -245,7 +264,6 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	if bundleGrant {
-		// 捆绑包价位：提交成功后发放附赠物品（不在事务内，失败只记日志）。
 		srv.grantPremiumBundle(cctx, ctx, uid, place, tier)
 	}
 	p, err := srv.BuildProfile307(cctx, uid)
@@ -257,6 +275,110 @@ func hPlaceBuyoutTx(ctx *Ctx) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	return body, true
+}
+
+// hBuyHouseTx 处理 3/33 房屋购买。
+//
+// 实抓证据（2026-11-04 trace）：请求 args 为 [房屋 item_id, 价格, bool]，
+// 如 ["level_012_north_sea_house", 4700, true]。价格由客户端取自 22/5 面板
+// 数据（gameserver 的 shop_boats.json），服务端按同一数据校验，避免面板价
+// 与结算价漂移。 bool 参数含义未确认，接受两种取值。
+//
+// 成功路径：同一事务内已拥有检查、银币扣款、房屋物品发放与流水。房屋物品
+// 发放到背包（物品定义带 dhaenhabecc 地点键，客户端据其把该地点的房屋
+// 标记为已拥有，从而显示"进入"而不是继续购买）；响应沿用 3/37 先例返回
+// 档案 307，客户端据其刷新余额。
+func hBuyHouseTx(ctx *Ctx) ([]byte, bool) {
+	srv := ctx.Sess.Srv
+	if !srv.requireDB(ctx) {
+		return nil, false
+	}
+	uid := ctx.Sess.Userid
+	strs := treeStrs(ctx.Tree)
+	ints := treeInts(ctx.Tree)
+	if len(strs) < 1 || len(ints) < 1 {
+		ctx.Log.Warn("3/33 参数无效", "strs", strs, "ints", ints)
+		ctx.ReplyFailure("System.InvalidOperationException", "房屋购买参数无效")
+		return nil, true
+	}
+	itemID, price := strs[0], ints[0]
+	if !strings.HasSuffix(itemID, "_house") {
+		ctx.Log.Warn("3/33 非房屋商品，拒绝", "item", itemID)
+		ctx.ReplyFailure("System.InvalidOperationException", "商品不是房屋")
+		return nil, true
+	}
+	// 价格与 22/5 面板一致才结算；面板是客户端唯一的价格来源。
+	var tier uint64
+	for _, row := range loadShopBoats() {
+		if row.Name == itemID {
+			tier = row.Price
+			break
+		}
+	}
+	if tier == 0 || price != tier {
+		ctx.Log.Info("3/33 价格与面板不符或未上架，不扣款", "item", itemID,
+			"price", price, "tier", tier)
+		ctx.ReplyFailure("System.InvalidOperationException", "房屋价格已变化，请重新打开购买界面")
+		return nil, true
+	}
+
+	cctx := ctx.Sess.pushCtx()
+	// 房屋不产生背包物品：所有权由 place_access(kind='house') 承载并经
+	// 档案 307 的 f20 下发（见 profilebuild.go）。
+	tx, err := beginEconomyTx(cctx, srv.DB)
+	if err != nil {
+		ctx.Log.Warn("3/33 开启事务失败", "err", err)
+		return nil, false
+	}
+	defer func() { _ = tx.Rollback() }()
+	var owned int
+	if err := tx.QueryRowContext(cctx,
+		`SELECT COUNT(*) FROM place_access WHERE uid=? AND place=? AND kind='house'`,
+		uid, itemID).Scan(&owned); err != nil {
+		ctx.Log.Warn("3/33 查询已拥有房屋失败", "item", itemID, "err", err)
+		return nil, false
+	}
+	if owned > 0 {
+		ctx.Log.Info("3/33 已拥有该房屋，不重复扣款", "item", itemID)
+		ctx.ReplyFailure("System.InvalidOperationException", "已拥有该房屋")
+		return nil, true
+	}
+	if walletErr := applyWalletTx(cctx, tx, uid, -int64(price), 0,
+		"buy", itemID, "", "house_purchase"); walletErr != nil {
+		if !errors.Is(walletErr, errInsufficientFunds) {
+			ctx.Log.Warn("3/33 银币扣款失败", "item", itemID, "err", walletErr)
+			return nil, false
+		}
+		ctx.Log.Info("3/33 银币余额不足，不扣款", "item", itemID, "price", price)
+		ctx.ReplyFailure("System.InvalidOperationException", "余额不足，未购买房屋")
+		return nil, true
+	}
+	// 所有权进档案 f20 拥有列表（与 3/37 地点买断写 place_access 同模式），
+	// 客户端重启后也能从 3/1 档案里读到已购房屋。
+	if _, err := tx.ExecContext(cctx, `
+		INSERT INTO place_access(uid, place, kind, ts) VALUES(?,?, 'house', ?)
+		ON CONFLICT (uid, place, kind) DO NOTHING`,
+		uid, itemID, float64(time.Now().Unix())); err != nil {
+		ctx.Log.Warn("3/33 记录房屋所有权失败", "item", itemID, "err", err)
+		return nil, false
+	}
+	if err := tx.Commit(); err != nil {
+		ctx.Log.Warn("3/33 事务提交失败", "item", itemID, "err", err)
+		return nil, false
+	}
+	ctx.Log.Info("3/33 购买房屋", "item", itemID, "silver", -int64(price))
+
+	p, err := srv.BuildProfile307(cctx, uid)
+	if err != nil {
+		ctx.Log.Warn("3/33 档案构造失败", "err", err)
+		return nil, false
+	}
+	body, err := proto.EncodeValue(p, ctx.Sess.Table())
+	if err != nil {
+		return nil, false
+	}
+	ctx.Sess.Push2_1()
 	return body, true
 }
 

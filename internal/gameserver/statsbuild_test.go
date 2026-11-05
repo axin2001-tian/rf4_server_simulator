@@ -86,8 +86,9 @@ func TestFishStats321FromCatchLog(t *testing.T) {
 }
 
 func TestRecordCardDefaultsAndCategory81(t *testing.T) {
-	// category 81 只有 rengine_1/rengine_2（渔轮电机），渔轮 DTO 的 f14 声明
-	// odlknjlbooh（kbpmmclfipg/1470），旧映射会让客户端解不出电机。
+	// category 81 只有 rengine_1/rengine_2（渔轮电机）。渔轮 DTO 里 f14
+	// dfjpnambjcj 声明的类型是 odlknjlbooh，对应 wire 类 kbpmmclfipg/1470；
+	// 原来的 dbjjakbbbfc/12601 会让客户端解出未知类型，电机槽无法使用。
 	if got := categoryWireClass[81]; got.Class != "kbpmmclfipg" || got.TypeID != 1470 {
 		t.Fatalf("category 81 映射=%+v，期望 kbpmmclfipg/1470", got)
 	}

@@ -220,39 +220,9 @@ func makeSonarEcho(sizeCM, depthM float64) (*proto.Value, error) {
 	})
 }
 
-// sonarValListMode 控制网格数组的编码形状：
-// false = args(code)（0x03 + code + 计数 + 元素），true = VAL 列表（0x01 + 哨兵 + 元素）。
-// 客户端自己的 14/8 上报用的是 VAL 列表，但服务端下发声呐时的形状还没确证，
-// 用运行参数 sonar_vallist 切换，便于在不重启进程的情况下对比两种编码。
-var sonarValListMode atomic.Bool
-
-// sonarDenseMode 诊断开关：每格都放一条回波，用来判断客户端是否真的渲染了
-// 服务端下发的数据（全格有回波仍然没鱼点，说明问题在数据形状而不是鱼群分布）。
-var sonarDenseMode atomic.Bool
-
-// sonarEchoValList 只把「格内回波数组」编码成 VAL 列表，外层网格仍用 args。
-// 用于区分两种数组形状到底是哪一层不对。
-var sonarEchoValList atomic.Bool
-
-// sonarPatternMode 诊断开关：整片网格只在正中格放一条大回波（50cm / 20m），
-// 其它格全空。用来确认客户端到底有没有渲染这份数据、以及渲染在哪个位置。
-var sonarPatternMode atomic.Bool
-
 func makeSonarCell(echoes []*proto.Value) (*proto.Value, error) {
-	if sonarValListMode.Load() || sonarEchoValList.Load() {
-		// 格内回波数组用 VAL 列表；空格也写成「空列表」而不是 null，
-		// 避免客户端把 null 当成偏移、整片网格错位。
-		return wiregen.MakeObj(sonarCellClass, map[int]*proto.Value{
-			0: proto.ValList(echoes...),
-		})
-	}
 	if len(echoes) == 0 {
-		// 空格必须用通用 null（0x00）。
-		// 客户端解码器没有 0xFF 分支——发 ElemNull 会让它抛
-		// "NotImplementedException: Not implemented 255"（Player.log 实测发生在
-		// TcpChannel::_fromSocket 解码声呐网格时），连接层解析失败 → 断线重连
-		// → 上船流程中断（表现为上船黑屏）。
-		return proto.Null(), nil
+		return proto.ElemNull(), nil
 	}
 	code := sonarEchoArgCode
 	return wiregen.MakeObj(sonarCellClass, map[int]*proto.Value{
@@ -261,10 +231,8 @@ func makeSonarCell(echoes []*proto.Value) (*proto.Value, error) {
 }
 
 func makeEmptySonarResponse(systemID string) (*proto.Value, error) {
-	// 注意：这里不能带 args(15004)。客户端解码 args 时会先按 code 解析元素类型，
-	// 4.0.25034 的 OpenTypeResolver 没有 15004，哪怕 0 个元素也会抛
-	// "GetType not found: 15004" 并断开连接（2026-11-04 09:59 实测）。
-	// 因此空网格直接给 f1=null。
+	// 不能带 args(15004)：解码 args 时会先按 code 解析元素类型，客户端没有
+	// 15004，哪怕 0 个元素也会抛 GetType not found 并断开连接。
 	return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
 		0: proto.StrVal(systemID),
 		1: proto.Null(),
@@ -272,7 +240,7 @@ func makeEmptySonarResponse(systemID string) (*proto.Value, error) {
 }
 
 // synthesizeSonar 生成声呐网格：2 到 5 个鱼群中心向邻近格扩散，
-// 空格编码为通用 null（0x00，客户端不认 0xFF）；未知水域返回 15003 空数组。
+// 空格编码为 0xFF；未知水域返回 15003 空数组。
 func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*proto.Value, error) {
 	grids, err := loadSonarGrids()
 	if err != nil {
@@ -300,27 +268,14 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 	}
 
 	items := make([]*proto.Value, 0, cellCount)
-	dense := sonarDenseMode.Load()
-	pattern := sonarPatternMode.Load()
 	for idx := 0; idx < cellCount; idx++ {
 		var echoes []*proto.Value
 		echoCount := 0
-		if pattern {
-			// 诊断用：只在中列固定深度放一条大回波，用来确认客户端是否渲染、
-			// 以及渲在哪个位置。其它格全空。
-			if idx == (rows/2)*cols+cols/2 {
-				echoCount = 1
-			}
-		} else if dense {
-			echoCount = 1 // 诊断用：每格都放一条回波，用来确认客户端是否真的在用这份数据
-		} else if hot[idx] > 0 {
+		if hot[idx] > 0 {
 			echoCount = rng.Intn(4) + 1
 		}
 		for echoCount > 0 {
 			sizeCM, depthM := sampleSonarEcho(rng, profile)
-			if pattern {
-				sizeCM, depthM = 50, 20
-			}
 			echo, err := makeSonarEcho(sizeCM, depthM)
 			if err != nil {
 				return nil, err
@@ -335,12 +290,6 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 		items = append(items, cell)
 	}
 
-	if sonarValListMode.Load() {
-		return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
-			0: proto.StrVal(systemID),
-			1: proto.ValList(items...),
-		})
-	}
 	code := sonarCellArgCode
 	return wiregen.MakeObj(sonarResponseClass, map[int]*proto.Value{
 		0: proto.StrVal(systemID),
@@ -349,18 +298,11 @@ func synthesizeSonar(systemID string, profile *sonarProfile, rng *rand.Rand) (*p
 }
 
 func (s *Server) sonarResponse(ctx context.Context, systemID string) (*proto.Value, error) {
-	// 客户端 4.0.25034 的 OpenTypeResolver 没有注册 15004：一旦 1/10 里带回
-	// 真实的声呐网格（args(15004) 里的格子对象），客户端解码 TcpChannel 时会抛
-	// "OpenTypeResolver.GetType not found: 15004"，连接层解析失败后主动断开，
-	// 表现为上船/切图后每隔几秒重连一次（Player.log 2026-11-04 09:50:23 实测）。
-	// 默认只回 15003 空网格；确实需要声呐回波时用运行参数 sonar_echo=1 打开。
+	// 客户端 4.0.25034 的响应类型表里没有 15004，发回波网格会在解码时抛
+	// "GetType not found: 15004" 并断开连接（上船、切图后反复重连）。
+	// 默认只回 15003 空网格；需要回波时用运行参数 sonar_echo=1 打开。
 	if s.tunableF("sonar_echo", 0) < 1 {
 		return makeEmptySonarResponse(systemID)
 	}
-	sonarMode := s.tunableF("sonar_vallist", 0)
-	sonarValListMode.Store(sonarMode == 1)
-	sonarEchoValList.Store(sonarMode == 2)
-	sonarDenseMode.Store(s.tunableF("sonar_dense", 0) >= 1)
-	sonarPatternMode.Store(s.tunableF("sonar_pattern", 0) >= 1)
 	return synthesizeSonar(systemID, s.sonarProfileFor(ctx, systemID), newSonarRand())
 }

@@ -3,7 +3,6 @@ package gameserver
 import (
 	"context"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,17 +20,7 @@ const testUID = 1000001
 
 func connectTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("打开测试 SQLite: %v", err)
-	}
-	if err := db.Migrate(); err != nil {
-		t.Fatalf("迁移失败: %v", err)
-	}
-	// starter 物品按静态 item_def 运行时构造，测试库也导入同一份定义。
-	importStaticForProbe(t, db)
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openItemTestDB(t)
 }
 
 // startGameserverWithDB 进程内主服（带 DB）。

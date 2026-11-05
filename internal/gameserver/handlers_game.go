@@ -55,12 +55,18 @@ func hItemCount(ctx *Ctx) ([]byte, bool) {
 	case containerBackpack:
 		used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, []string{"backpack", "rig"})
 	case containerKeepnet:
+		srv.retryCompletedCatchRecovery(ctx.Sess)
 		n, err := srv.DB.KeepnetList(cctx, ctx.Sess.Userid)
 		if err == nil {
 			used = int64(len(n))
 		}
 		cap, capMember = 100, 150
+	default:
+		if names := nativeInventoryContainers(container); names != nil {
+			used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, names)
+		}
 	}
+	cap, capMember = srv.importedContainerCapacity(cctx, ctx.Sess.Userid, container, cap, capMember)
 	obj := wiregen.MustMakeObj("pbndmldbfai", map[int]*proto.Value{
 		0: proto.U32(uint32(used)),
 		1: proto.U32(uint32(cap)),
@@ -87,11 +93,33 @@ func hItemGUIDs(ctx *Ctx) ([]byte, bool) {
 	case containerBackpack:
 		guids, _ = srv.DB.ItemGUIDsByContainers(cctx, ctx.Sess.Userid, []string{"backpack", "rig"})
 	case containerKeepnet:
+		srv.retryCompletedCatchRecovery(ctx.Sess)
 		list, err := srv.DB.KeepnetList(cctx, ctx.Sess.Userid)
 		if err == nil {
 			for _, e := range list {
 				guids = append(guids, e.EchoGUID)
 			}
+		}
+	default:
+		if names := nativeInventoryContainers(container); names != nil {
+			guids, _ = srv.DB.ItemGUIDsByContainers(cctx, ctx.Sess.Userid, names)
+		}
+	}
+	if ctx.Tree.ArgCount() >= 3 {
+		start, startOK := ctx.ArgInt(1)
+		count, countOK := ctx.ArgInt(2)
+		if !startOK || !countOK || start > 100000 || count > 500 {
+			ctx.ReplyFailure("System.ArgumentException", "物品分页参数无效")
+			return nil, true
+		}
+		if start >= uint64(len(guids)) {
+			guids = nil
+		} else {
+			end := start + count
+			if end > uint64(len(guids)) {
+				end = uint64(len(guids))
+			}
+			guids = guids[start:end]
 		}
 	}
 	body, err := proto.EncodeValue(proto.GuidArr(guids), ctx.Sess.Table())
@@ -113,21 +141,18 @@ func hItemDetails(ctx *Ctx) ([]byte, bool) {
 	cctx := ctx.Sess.pushCtx()
 	out := proto.Args(proto.S("61"))
 	if container == containerKeepnet {
+		srv.retryCompletedCatchRecovery(ctx.Sess)
 		for _, g := range guids {
 			e, err := srv.DB.KeepnetGet(cctx, ctx.Sess.Userid, g)
 			if err != nil || e == nil {
 				continue
 			}
-			out.Items = append(out.Items, buildKeepnet25(e, srv.currentLevel(ctx.Sess.Userid)))
+			out.Items = append(out.Items, srv.keepnetItemTree(cctx, e, srv.currentLevel(ctx.Sess.Userid)))
 		}
-	} else if container != containerBackpack {
-		// 非背包容器必须返回空。把背包物品下发到其他容器会让同一 GUID
-		// 被客户端登记两次，导致容器索引冲突。鱼护内容单独处理。
-		ctx.Log.Info("4/5 容器不在建模范围 -> 回空", "container", container)
-	} else {
+	} else if containers := nativeInventoryContainers(container); containers != nil {
 		for _, g := range guids {
 			row, err := srv.DB.GetItemByGUID(cctx, g)
-			if err != nil || row == nil || row.UID != ctx.Sess.Userid {
+			if err != nil || row == nil || row.UID != ctx.Sess.Userid || !inventoryContainerMatches(row.Container, containers) {
 				continue
 			}
 			tree, err := srv.ItemToTree(cctx, row)
@@ -330,23 +355,16 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 	cctx := ctx.Sess.pushCtx()
 	uid := ctx.Sess.Userid
 	if tier := placeBuyoutPrice(place, packet); tier > 0 && price == tier {
-		// 金币买断（百分位）：先校验余额，不足不扣款也不授予。
-		p, err := srv.DB.EnsureProfile(cctx, uid)
-		if err == nil && p != nil && p.Gold < tier {
-			ctx.Log.Info("3/37 金币不足，不扣款", "place", place, "tier", packet,
-				"gold", p.Gold, "need", tier)
-		} else {
-			if err == nil && p != nil {
-				_ = srv.DB.UpdateBalance(cctx, uid, p.Silver, p.Gold-tier, p.Bank)
-			}
-			if err := srv.DB.PlaceAccessInsert(cctx, uid, place, "buyout"); err != nil {
-				ctx.Log.Warn("3/37 授予地点失败", "place", place, "err", err)
-			}
-			_ = srv.DB.AddTxn(cctx, uid, "buy", place, "", 0, -tier, "place_buyout")
-			ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
-				"gold", -tier, "gold_yuan", float64(tier)/100.0)
-			srv.grantPremiumBundle(cctx, ctx, uid, place, tier)
+		// 金币买断（百分位）：扣款 → 授予 → 流水
+		if p, err := srv.DB.EnsureProfile(cctx, uid); err == nil && p != nil {
+			_ = srv.DB.UpdateBalance(cctx, uid, p.Silver, p.Gold-tier, p.Bank)
 		}
+		if err := srv.DB.PlaceAccessInsert(cctx, uid, place, "buyout"); err != nil {
+			ctx.Log.Warn("3/37 授予地点失败", "place", place, "err", err)
+		}
+		_ = srv.DB.AddTxn(cctx, uid, "buy", place, "", 0, -tier, "place_buyout")
+		ctx.Log.Info("3/37 金币买断地图", "place", place, "tier", packet,
+			"gold", -tier, "gold_yuan", float64(tier)/100.0)
 	} else {
 		tiers, _ := placeBuyoutTiers[place]
 		ctx.Log.Info("3/37 价格与静态表不符，不扣款", "place", place,
@@ -366,134 +384,6 @@ func hPlaceBuyout(ctx *Ctx) ([]byte, bool) {
 
 // parsePlaceBuyoutArgs 顶层 args 位置取参：[0]=place 字符串、[1]=packetId、
 // [2]=price（long）。缺参按零值处理（调用方走"价格不符"分支）。
-// premiumBundleItem 捆绑包里的单件物品与数量。
-type premiumBundleItem struct {
-	ItemID string `json:"item_id"`
-	Qty    int64  `json:"qty"`
-}
-
-// premiumBundleDef 一个地图的捆绑包档位：按（地图 + 价位）识别，
-// 不同地图的捆绑包内容和价格都不一样。
-type premiumBundleDef struct {
-	Place string              `json:"place"`
-	Price int64               `json:"price"`
-	Name  string              `json:"name"`
-	Items []premiumBundleItem `json:"items"`
-}
-
-// bundleDefsKVKey kv 表里保存捆绑包配置的键；改这个 JSON 即可热更新，不需要重启进程。
-const bundleDefsKVKey = "bundle_defs"
-
-// defaultPremiumBundleDefs 内置兜底：北海（level_012_north_sea）的三档捆绑包。
-// 库里没有 bundle_defs 时用它。
-var defaultPremiumBundleDefs = []premiumBundleDef{{
-	Place: "level_012_north_sea",
-	Price: 17990,
-	Name:  "全捆绑包",
-	Items: northSeaBundleItems,
-}, {
-	Place: "level_012_north_sea",
-	Price: 15990,
-	Name:  "扩展捆绑包",
-	Items: northSeaBundleItems,
-}, {
-	Place: "level_012_north_sea",
-	Price: 3290,
-	Name:  "基本捆绑包",
-	Items: northSeaBundleItems,
-}}
-
-// northSeaBundleItems 北海捆绑包附赠物品。
-//
-// 说明：
-//   - 海鱼饵不整盒发（box_sea_baits 这套盒物品在本机客户端加载不出来，会卡"正在下载"），
-//     改为按盒内清单逐件发同款海饵，效果一致且都是能正常显示的物品；
-//   - Saltmaster SBH 88 鱼竿 id 是 pilkr_10208_fu88_sbtn（10410，category 3）；
-//   - Venga SBH 10000 渔轮 id 是 spin_5140_sbtn（13630，category 6）；
-//   - 技能书 seafish_book：category 80 的顶层物品类要按 wrapper ipdakkbfoja/13301 发，
-//     发成 13300（书目配置类）客户端会强转失败卡载入；
-//   - 狼鳚港雕像在目录里没有对应项，暂不发。
-var northSeaBundleItems = []premiumBundleItem{
-	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1}, // Saltmaster SBH 88 鱼竿
-	{ItemID: "spin_5140_sbtn", Qty: 1},        // Venga SBH 10000 渔轮
-	{ItemID: "seafish_book", Qty: 1},          // 书「海钓入门技能书」
-	{ItemID: "fb_lf_makrel", Qty: 1},          // 一套海鱼饵（盒内清单）
-	{ItemID: "fb_lf_saida", Qty: 1},
-	{ItemID: "fb_lf_seld", Qty: 1},
-	{ItemID: "fb_bf_makrel", Qty: 1},
-	{ItemID: "fb_bf_saida", Qty: 1},
-	{ItemID: "fb_bf_seld", Qty: 1},
-	{ItemID: "fb_shrimp", Qty: 1},
-	{ItemID: "fb_nereis", Qty: 1},
-	{ItemID: "ticket_boat_norw_sea_a_120", Qty: 10}, // 10 张 5 天租船票（120 小时）
-}
-
-// bundleDefs 读当前生效的捆绑包表：优先 kv.bundle_defs（可热更新），否则用内置兜底。
-func (s *Server) bundleDefs(ctx context.Context) []premiumBundleDef {
-	if s.DB != nil {
-		var raw string
-		if err := s.DB.SQL.QueryRowContext(ctx,
-			`SELECT v FROM kv WHERE k=?`, bundleDefsKVKey).Scan(&raw); err == nil && raw != "" {
-			var defs []premiumBundleDef
-			if json.Unmarshal([]byte(raw), &defs) == nil && len(defs) > 0 {
-				return defs
-			}
-		}
-	}
-	return defaultPremiumBundleDefs
-}
-
-// grantPremiumBundle 在 3/37 买断成功后按（地图 + 价位）发放捆绑包附赠物品。
-// 背包槽位必须逐个分配：CreateItem 默认 slot=0，多件同槽会让客户端只显示一件。
-func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid int64, place string, price int64) {
-	var hit *premiumBundleDef
-	for _, def := range s.bundleDefs(ctx) {
-		if def.Price != price {
-			continue
-		}
-		if def.Place != "" && def.Place != place {
-			continue
-		}
-		d := def
-		hit = &d
-		break
-	}
-	if hit == nil {
-		c.Log.Info("捆绑包未配置，跳过发放", "place", place, "price", price)
-		return
-	}
-	name := hit.Name
-	if name == "" {
-		name = place
-	}
-	slot, err := s.DB.NextFreeSlot(ctx, uid, "backpack")
-	if err != nil {
-		c.Log.Warn("捆绑包发放取空槽失败", "bundle", name, "err", err)
-		return
-	}
-	granted := 0
-	for _, it := range hit.Items {
-		row, gerr := s.CreateItem(ctx, uid, it.ItemID, "backpack", it.Qty)
-		if gerr != nil || row == nil {
-			c.Log.Warn("捆绑包物品发放失败", "bundle", name, "item", it.ItemID, "err", gerr)
-			continue
-		}
-		if serr := s.DB.SetItemSlot(ctx, row.GUID, slot); serr != nil {
-			c.Log.Warn("捆绑包物品槽位设置失败", "item", it.ItemID, "slot", slot, "err", serr)
-		}
-		slot++
-		granted++
-		if c.Sess != nil {
-			// 逐件推 4/22：客户端收到后会把物品加进背包（与邮件领取同一条通道），
-			// 不用重登，也不会像全量推送那样只更新战斗物品。
-			s.pushItemUpdate(c.Sess.Userid, row)
-		}
-	}
-	c.Log.Info("捆绑包附赠物品已发放", "bundle", name, "place", place, "price", price,
-		"granted", granted, "total", len(hit.Items))
-}
-
-// parsePlaceBuyoutArgs 从顶层 args 取 [place, packet, price]。
 func parsePlaceBuyoutArgs(tree *proto.Value) (place string, packet, price int64) {
 	if tree == nil || tree.Kind != proto.KindArgs {
 		return "", 0, 0
@@ -534,11 +424,13 @@ func hPlace(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 	key = travelLevelKey(key)
-	body, err := ctx.Sess.Srv.buildMapDobBody(key, time.Now().Unix())
+	nowUnix := time.Now().Unix()
+	body, err := ctx.Sess.Srv.buildMapDobBody(key, nowUnix)
 	if err != nil {
 		ctx.Log.Warn("1/12 dob 构造失败", "level", key, "err", err)
 		return nil, false
 	}
+	ctx.Sess.rememberWeather(key, nowUnix)
 	return body, true
 }
 
@@ -556,7 +448,8 @@ func hTravel(ctx *Ctx) ([]byte, bool) {
 	}
 	key = travelLevelKey(key)
 	sess := ctx.Sess
-	body, err := sess.Srv.buildTravelBody(sess, key)
+	nowUnix := time.Now().Unix()
+	body, err := sess.Srv.buildTravelBodyAt(sess, key, nowUnix)
 	if err != nil {
 		ctx.Log.Warn("1/14 travel 构造失败", "level", key, "err", err)
 		return nil, false
@@ -572,6 +465,7 @@ func hTravel(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	sess.Srv.setLevel(sess.Userid, key)
+	sess.rememberWeather(key, nowUnix)
 	ctx.Log.Info("1/14 travel", "level", key, "scene", scene, "spot", spot)
 	return body, true
 }
@@ -608,7 +502,8 @@ func hEnterMap(ctx *Ctx) ([]byte, bool) {
 		scene = sceneForLevel(level)
 	}
 
-	body, err := srv.buildSpawnLocatorBody(level, scene, time.Now().Unix())
+	nowUnix := time.Now().Unix()
+	body, err := srv.buildSpawnLocatorBody(level, scene, nowUnix)
 	if err != nil {
 		ctx.Log.Warn("1/13 出生点定位构造失败", "level", level, "err", err)
 		return nil, false
@@ -618,6 +513,7 @@ func hEnterMap(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	srv.setLevel(uid, level)
+	sess.rememberWeather(level, nowUnix)
 	ctx.Log.Info("1/13 下发出生地图", "level", level, "scene", scene, "spot", spot, "bytes", len(body))
 	return body, true
 }
@@ -741,17 +637,36 @@ func hCastPrepare(ctx *Ctx) ([]byte, bool) {
 		gear = guids[0]
 	}
 	st := srv.stateFor(ctx.Sess.Userid)
+	if !srv.pendingCatchAllowsCast(ctx, st) {
+		return nil, true
+	}
 	st.mu.Lock()
 	st.GearGuid = gear
 	depthCM := st.DepthCM
 	rigType := st.RigType
 	st.mu.Unlock()
+	if err := ctx.Sess.prepareBaitForCast(st, gear); err != nil {
+		ctx.Log.Warn("抛竿前补饵失败", "err", err)
+		return nil, false
+	}
 	// 收敛钓组数据：补齐 f5、rig 行、组件和尖梢。
 	// 尖梢有更新时推送 4/22 全量竿树，因为客户端抛竿前会校验实例 f8。
 	if srv.ensureRig(ctx.Sess.pushCtx(), ctx.Sess.Userid, gear) {
 		ctx.Sess.Push4_22Full()
 	}
 	if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear); err == nil && row != nil {
+		if row.Durability <= 0 {
+			// 断竿/耐久归零的竿不可抛投（客户端可能不理会 17/7 的拒取
+			// 响应继续持竿，14/1 必须再拦一道）。
+			st.mu.Lock()
+			st.GearGuid = ""
+			st.mu.Unlock()
+			ctx.Log.Info("14/1 被拒：鱼竿已损坏", "rod", shortGUID(gear))
+			if body := castReady158(ctx, "", depthCM, 0); body != nil {
+				return body, true
+			}
+			return nil, false
+		}
 		rigType = srv.rigTypeOfItem(ctx.Sess.pushCtx(), row)
 		st.mu.Lock()
 		st.RigType = rigType
@@ -777,6 +692,9 @@ func hCast(ctx *Ctx) ([]byte, bool) {
 		gear = guids[len(guids)-1]
 	}
 	st := srv.stateFor(ctx.Sess.Userid)
+	if !srv.pendingCatchAllowsCast(ctx, st) {
+		return nil, true
+	}
 	if ctx.Tree != nil {
 		if loc := findObjStr(ctx.Tree, "olieodeoaof"); loc != "" {
 			st.Loc = loc
@@ -785,13 +703,28 @@ func hCast(ctx *Ctx) ([]byte, bool) {
 			st.Spot = spot
 		}
 	}
+	castX, castZ, hasCastPos := castLandingPosition(ctx.Tree)
 	st.mu.Lock()
 	st.GearGuid = gear
+	st.CastPosX, st.CastPosZ, st.HasCastPos = castX, castZ, hasCastPos
 	st.mu.Unlock()
+	if err := ctx.Sess.prepareBaitForCast(st, gear); err != nil {
+		ctx.Log.Warn("抛竿前补饵失败", "err", err)
+		return nil, false
+	}
 	srv.ensureRig(ctx.Sess.pushCtx(), ctx.Sess.Userid, gear)
 	// 记录钓组类型并读取当前钩上饵；路亚使用独立的咬钩节奏。
 	rigType := int64(0)
 	if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear); err == nil && row != nil {
+		if row.Durability <= 0 {
+			// 断竿不可抛投：耐久归零只能修理，17/7 拒取后客户端仍可能直发 14/2。
+			st.mu.Lock()
+			st.GearGuid = ""
+			st.mu.Unlock()
+			ctx.Log.Info("14/2 被拒：鱼竿已损坏", "rod", shortGUID(gear))
+			ctx.ReplyFailure("System.InvalidOperationException", "鱼竿已损坏，请先修理")
+			return nil, true
+		}
 		rt := srv.rigTypeOfItem(ctx.Sess.pushCtx(), row)
 		rigType = rt
 		st.mu.Lock()
@@ -829,10 +762,16 @@ func hCast(ctx *Ctx) ([]byte, bool) {
 		if hasData && !nearWater {
 			ctx.Log.Info("距水体过远，本杆不派鱼", "loc", locNow, "x", px, "z", pz, "reach", waterReachM)
 		} else {
-			srv.scheduleBite(ctx.Sess, st)
+			if !srv.scheduleBite(ctx.Sess, st) {
+				ctx.ReplyFailure("System.InvalidOperationException", "请先处理当前鱼获")
+				return nil, true
+			}
 		}
 	} else {
-		srv.scheduleBite(ctx.Sess, st)
+		if !srv.scheduleBite(ctx.Sess, st) {
+			ctx.ReplyFailure("System.InvalidOperationException", "请先处理当前鱼获")
+			return nil, true
+		}
 	}
 
 	// 响应 800.f0 返回当前钓组 157 对象，包含完整竿树和重建后的 f5。
@@ -861,6 +800,30 @@ func findObjStr(root *proto.Value, class string) string {
 
 func findObjU32(root *proto.Value, class string) uint64 {
 	return findObjNthU32(root, class, 0)
+}
+
+// castLandingPosition 读取 14/2 olieodeoaof.f6/f7 的实际抛竿落点。
+// 这两列在 wire 上以 U32 承载 F32 位型。
+func castLandingPosition(root *proto.Value) (float64, float64, bool) {
+	obj := findObj(root, "olieodeoaof")
+	if obj == nil {
+		return 0, 0, false
+	}
+	xi := fieldIdxByCS("olieodeoaof", "bopigefkkom")
+	zi := fieldIdxByCS("olieodeoaof", "ceicchfhpld")
+	if xi < 0 || zi < 0 || xi >= obj.FieldCount() || zi >= obj.FieldCount() {
+		return 0, 0, false
+	}
+	xf, zf := obj.Field(xi), obj.Field(zi)
+	if xf.Num == nil || zf.Num == nil {
+		return 0, 0, false
+	}
+	x := float64(math.Float32frombits(uint32(u64Of(xf.Num))))
+	z := float64(math.Float32frombits(uint32(u64Of(zf.Num))))
+	if math.IsNaN(x) || math.IsNaN(z) || math.IsInf(x, 0) || math.IsInf(z, 0) {
+		return 0, 0, false
+	}
+	return x, z, true
 }
 
 // findObjNthByte 取对象第 n 个 BYTE 字段。14/2 的 olieodeoaof.f8 是本次
@@ -964,6 +927,15 @@ func hFishingStep(ctx *Ctx) ([]byte, bool) {
 				}
 			}
 			st.mu.Unlock()
+			if enterWater {
+				if err := ctx.Sess.Srv.consumeCastBait(ctx.Sess, st); err != nil {
+					ctx.Log.Warn("入水窝料扣减失败", "err", err)
+					st.mu.Lock()
+					st.InWater = false
+					st.mu.Unlock()
+					return nil, true
+				}
+			}
 			if needBite {
 				ctx.Log.Info("钓组在水中，补排咬钩", "f5", fmt.Sprintf("0x%X", anim))
 				ctx.Sess.Srv.scheduleBiteForHooked(ctx.Sess, st)
@@ -1002,9 +974,15 @@ func hFishingHooked(ctx *Ctx) ([]byte, bool) {
 	st.mu.Lock()
 	st.Hooked = true
 	pending := st.Pending
+	gear := st.GearGuid
 	castActive := st.CastActive
 	resolved := st.Resolved
 	st.mu.Unlock()
+	if pending != nil {
+		if err := srv.consumeHookedBait(ctx.Sess, pending, gear); err != nil {
+			ctx.Log.Warn("中鱼后鱼饵扣减失败", "fish", pending.FishGUID, "err", err)
+		}
+	}
 
 	// 登录恢复/提前起竿：复用完整判鱼链（概率、GM、装备限重、mounted hook），
 	// 保留本次 Hooked=true；不能直接 roll 后把竿 guid 当 f23。
@@ -1017,10 +995,9 @@ func hFishingHooked(ctx *Ctx) ([]byte, bool) {
 
 func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 	// 14/12 的 f0 是客户端鱼实体状态变化：
-	//   f0=3：判鱼推送未被接收，6 秒后重推；
-	//   f0=5：鱼弃咬离开，不重推也不作废；
-	//   f0=6：新鱼已替换旧鱼，不重推；
-	//   其他：本轮没有鱼，作废本次等待。
+	//   f0=3/5/6：客户端因钓组状态拒收鱼实体，保留当前鱼并延迟重推；
+	//   f0=1/2/8：当前鱼未中钩离场；钓组仍在水中时重新等待下一尾；
+	//   其他：保守按本轮没有鱼处理。
 	srv := ctx.Sess.Srv
 	st := srv.stateFor(ctx.Sess.Userid)
 	f0 := uint32(0)
@@ -1031,38 +1008,53 @@ func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 	}
 	st.mu.Lock()
 	ctx.Log.Info("14/12 鱼状态", "f0", f0)
-	if f0 == 3 {
+	if f0 == 3 || f0 == 5 || f0 == 6 {
+		// 客户端尚未接收鱼实体：保留当前鱼，延迟重推同一尾，
+		// 不能把不兼容的钓组状态误当成鱼已离场。
+		st.cancelBiteTimerLocked()
 		st.PushSent = false
-		pending := st.Pending
-		castActive := st.CastActive
+		st.Hooked = false
+		if st.CastActive && st.Pending != nil {
+			srv.armPendingTimerLocked(ctx.Sess.Userid, st, 6*time.Second)
+		}
 		st.mu.Unlock()
-		if castActive && pending != nil {
-			uid := ctx.Sess.Userid
-			time.AfterFunc(6*time.Second, func() { srv.repushPending14_14(uid) })
+		return nil, true
+	}
+	if f0 == 1 || f0 == 2 || f0 == 8 {
+		// 实机日志确认：1/2/8 会在鱼未中钩、钓组仍在水中时上报。
+		// 它们不代表收竿、断线或钓组离水；
+		// 旧逻辑把 CastActive 一并清掉，导致饵仍在水中却永远不再派鱼。
+		// 只清理当前鱼，并在同一水中钓组上重新安排下一次判鱼。
+		st.cancelBiteTimerLocked()
+		pending := st.Pending
+		alreadyResolved := st.Resolved
+		st.Pending = nil
+		st.PushSent = false
+		st.Hooked = false
+		st.Resolved = false
+		castActive := st.CastActive
+		inWater := st.InWater
+		st.mu.Unlock()
+		if !alreadyResolved {
+			srv.notifyFishEscape(ctx.Sess, pending, "脱钩离开")
+		}
+		if castActive && inWater {
+			ctx.Log.Info("14/12 鱼未中钩离场，重新排下一尾", "f0", f0)
+			srv.scheduleBiteState(ctx.Sess, st, false, false)
 		}
 		return nil, true
 	}
-	// f0=6：新鱼已替换旧鱼，保持当前等待状态，不重推也不重排。
-	if f0 == 6 {
-		st.mu.Unlock()
-		return nil, true
-	}
-	// f0=5 以及其它未列出的取值都表示"这条鱼已经不在了"（弃咬/脱钩/跑鱼）。
-	// 本轮的鱼作废，避免 14/4 把它结算成渔获；但饵还在水里时继续排下一口，
-	// 玩家不用每次脱钩都重抛。实测脱钩时客户端上报的是 f0=8，不是 5。
-	if st.biteTimer != nil {
-		st.biteTimer.Stop()
-	}
+	st.cancelBiteTimerLocked()
+	st.cancelPendingTimerLocked()
+	pending := st.Pending
+	alreadyResolved := st.Resolved
+	st.Resolved = true
 	st.Pending = nil
-	st.Hooked = false
-	keepCast := st.CastActive && st.InWater
-	st.Resolved = !keepCast
-	st.CastActive = keepCast
+	st.CastActive = false
 	st.mu.Unlock()
 	srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
-	if keepCast {
-		srv.scheduleBiteState(ctx.Sess, st, false, false)
-		ctx.Log.Info("14/12 脱钩后继续等咬钩", "f0", f0)
+	if !alreadyResolved {
+		srv.notifyFishEscape(ctx.Sess, pending, "脱钩离开")
 	}
 	return nil, true
 }
@@ -1073,9 +1065,7 @@ func hFishingLoad(ctx *Ctx) ([]byte, bool) {
 	st.mu.Lock()
 	st.Hooked = true
 	st.mu.Unlock()
-	// 14/8 是客户端每 2 秒上报的钓组/渔轮状态（线长、曳力等）。这里不要再推
-	// 全量背包：4/22 会把渔轮字段刷回服务端保存的旧值，客户端电动收线的
-	// 本地进度每两秒被重置，表现为"能切电动但收不了线"。
+	ctx.Sess.Push4_22Full()
 	return nil, true
 }
 
@@ -1243,6 +1233,127 @@ func filetimeFromUnixFloat(ts float64) int64 {
 // netTicksFromUnix .NET Ticks。
 func netTicksFromUnix(unixSec float64) int64 {
 	return int64(unixSec)*10_000_000 + 621_355_968_000_000_000
+}
+
+// premiumBundleItem 捆绑包里的单件物品与数量。
+type premiumBundleItem struct {
+	ItemID string `json:"item_id"`
+	Qty    int64  `json:"qty"`
+}
+
+// premiumBundleDef 一个地图的捆绑包档位：客户端按（地图 + 价位）区分，不同地图内容不同。
+type premiumBundleDef struct {
+	Place string              `json:"place"`
+	Price int64               `json:"price"`
+	Name  string              `json:"name"`
+	Items []premiumBundleItem `json:"items"`
+}
+
+// bundleDefsKVKey 保存捆绑包配置的 kv 键；改这个 JSON 即可更新配置，不必重启进程。
+const bundleDefsKVKey = "bundle_defs"
+
+// defaultPremiumBundleDefs 内置兜底配置：北海三档。
+var defaultPremiumBundleDefs = []premiumBundleDef{
+	{
+		Place: "level_012_north_sea",
+		Price: 17990,
+		Name:  "北海-全捆绑包",
+		Items: northSeaBundleItems,
+	},
+	{
+		Place: "level_012_north_sea",
+		Price: 15990,
+		Name:  "北海-扩展捆绑包",
+		Items: northSeaBundleItems,
+	},
+	{
+		Place: "level_012_north_sea",
+		Price: 3290,
+		Name:  "北海-基本捆绑包",
+		Items: northSeaBundleItems,
+	},
+}
+
+// northSeaBundleItems 北海捆绑包附赠物品。
+//
+// 海鱼饵按 box_sea_baits 的盒内清单逐件发放：该套盒物品在 4.0.25034 客户端里加载不出来，
+// 整盒发放会让背包显示"正在下载"。
+var northSeaBundleItems = []premiumBundleItem{
+	{ItemID: "pilkr_10208_fu88_sbtn", Qty: 1},
+	{ItemID: "spin_5140_sbtn", Qty: 1},
+	{ItemID: "seafish_book", Qty: 1},
+	{ItemID: "fb_lf_makrel", Qty: 1},
+	{ItemID: "fb_lf_saida", Qty: 1},
+	{ItemID: "fb_lf_seld", Qty: 1},
+	{ItemID: "fb_bf_makrel", Qty: 1},
+	{ItemID: "fb_bf_saida", Qty: 1},
+	{ItemID: "fb_bf_seld", Qty: 1},
+	{ItemID: "fb_shrimp", Qty: 1},
+	{ItemID: "fb_nereis", Qty: 1},
+	{ItemID: "ticket_boat_norw_sea_a_120", Qty: 10},
+}
+
+// bundleDefs 读当前生效的捆绑包表：优先 kv.bundle_defs，缺失或解析失败时用内置兜底。
+func (s *Server) bundleDefs(ctx context.Context) []premiumBundleDef {
+	if s.DB != nil {
+		var raw string
+		if err := s.DB.SQL.QueryRowContext(ctx,
+			`SELECT v FROM kv WHERE k=?`, bundleDefsKVKey).Scan(&raw); err == nil && raw != "" {
+			var defs []premiumBundleDef
+			if json.Unmarshal([]byte(raw), &defs) == nil && len(defs) > 0 {
+				return defs
+			}
+		}
+	}
+	return defaultPremiumBundleDefs
+}
+
+// grantPremiumBundle 在 3/37 买断成功后，按（地图 + 价位）发放捆绑包附赠物品。
+// 物品是直接落库的，客户端不会自动刷新，因此逐件通过 4/22 推送。
+func (s *Server) grantPremiumBundle(ctx context.Context, c *Ctx, uid int64, place string, price int64) {
+	var hit *premiumBundleDef
+	for _, def := range s.bundleDefs(ctx) {
+		if def.Price != price {
+			continue
+		}
+		if def.Place != "" && def.Place != place {
+			continue
+		}
+		d := def
+		hit = &d
+		break
+	}
+	if hit == nil {
+		c.Log.Info("捆绑包未配置，跳过发放", "place", place, "price", price)
+		return
+	}
+	name := hit.Name
+	if name == "" {
+		name = place
+	}
+	slot, err := s.DB.NextFreeSlot(ctx, uid, "backpack")
+	if err != nil {
+		c.Log.Warn("捆绑包发放取空槽失败", "bundle", name, "err", err)
+		return
+	}
+	granted := 0
+	for _, it := range hit.Items {
+		row, gerr := s.CreateItem(ctx, uid, it.ItemID, "backpack", it.Qty)
+		if gerr != nil || row == nil {
+			c.Log.Warn("捆绑包物品发放失败", "bundle", name, "item", it.ItemID, "err", gerr)
+			continue
+		}
+		if serr := s.DB.SetItemSlot(ctx, row.GUID, slot); serr != nil {
+			c.Log.Warn("捆绑包物品槽位设置失败", "item", it.ItemID, "slot", slot, "err", serr)
+		}
+		slot++
+		granted++
+		if c.Sess != nil {
+			s.pushItemUpdate(c.Sess.Userid, row)
+		}
+	}
+	c.Log.Info("捆绑包附赠物品已发放", "bundle", name, "place", place, "price", price,
+		"granted", granted, "total", len(hit.Items))
 }
 
 var _ = context.Background

@@ -52,7 +52,7 @@ func seedBaitRuleTest(t *testing.T) (*Server, *store.DB) {
 	for _, q := range []string{
 		`INSERT INTO loc_alias(alias,loc) VALUES('level_900_rules','rules-test')`,
 		`INSERT INTO loc_wiki_fish(loc,fish_key,fish_zh) VALUES('rules-test','c.roach','常见拟鲤'),('rules-test','frog','青蛙')`,
-		`INSERT INTO item_def(numeric_id,item_id,category,attrs_json) VALUES(999801,'rule_worm',27,'{"fopbhlmkcpe":6}'),(999802,'rule_lure',17,'{"mbemakijdeh":4}'),(999803,'rule_other',27,'{}')`,
+		`INSERT INTO item_def(numeric_id,item_id,category,attrs_json) VALUES(999801,'rule_worm',27,'{"fopbhlmkcpe":6}'),(999802,'rule_lure',17,'{"mbemakijdeh":4}'),(999803,'rule_other',27,'{"fopbhlmkcpe":6}')`,
 		`INSERT INTO item_catalog(item_id,name_zh) VALUES('rule_worm','蚯蚓'),('rule_lure','Hunter 1-001'),('rule_other','补充饵')`,
 	} {
 		if _, err := db.SQL.Exec(q); err != nil {
@@ -82,18 +82,18 @@ func TestFishBaitSwitchFiltersAndRestoresLegacy(t *testing.T) {
 		t.Fatal("legacy fallback changed")
 	}
 	setBaitRuleSwitch(t, s, "1")
-	for _, bait := range []string{"", "missing", "rule_lure", "rule_other"} {
+	for _, bait := range []string{"", "missing", "rule_lure"} {
 		if f := s.rollFish("level_900_rules", bait); f != nil {
 			t.Fatalf("unsupported bait %q produced %s", bait, f.Species)
 		}
 	}
 	for range 32 {
-		if f := s.rollFish("level_900_rules", "rule_worm"); f == nil || f.Species != "c.roach" {
+		if f := s.rollFish("level_900_rules", "rule_worm"); f == nil || (f.Species != "c.roach" && f.Species != "frog") {
 			t.Fatalf("wrong fish: %+v", f)
 		}
 	}
-	if s.rollFish("unknown-map", "rule_worm") != nil {
-		t.Fatal("strict fallback bypassed location")
+	if s.rollFish("unknown-map", "rule_worm") == nil {
+		t.Fatal("bait-only rules must retain water-wide fallback")
 	}
 	// 实钓证据可补充未列出的搭配，但不能绕过明确不吃拟饵的规则。
 	for _, bait := range []string{"rule_lure", "rule_other"} {
@@ -104,7 +104,7 @@ func TestFishBaitSwitchFiltersAndRestoresLegacy(t *testing.T) {
 	if s.rollFish("level_900_rules", "rule_lure") != nil {
 		t.Fatal("evidence bypassed explicit exclusion")
 	}
-	if f := s.rollFish("level_900_rules", "rule_other"); f == nil || f.Species != "c.roach" {
+	if f := s.rollFish("level_900_rules", "rule_other"); f == nil {
 		t.Fatalf("evidence ignored: %+v", f)
 	}
 	for _, q := range []string{
@@ -144,19 +144,14 @@ func TestFishBaitNoCandidateTimerAndHotReload(t *testing.T) {
 	if s.tunableF("fish_bait_rules_enabled", 0) != 1 {
 		t.Fatal("hot reload failed")
 	}
-	addFishingRecoverySession(s, 1000001, 901)
-	sess := s.liveSessionByUID(1000001)
+	sess := registerBiteTestSession(t, s, 901, nil)
 	st := s.stateFor(sess.Userid)
 	st.mu.Lock()
 	st.CastActive, st.InWater = true, true
 	st.Loc, st.Bait = "level_900_rules", "rule_lure"
 	st.CastTs = time.Now().Add(-time.Minute)
-	timer := time.NewTimer(time.Hour)
-	defer timer.Stop()
-	st.biteTimer = timer
-	gen := st.BiteGen
 	st.mu.Unlock()
-	s.onBiteTimer(sess.Userid, gen)
+	s.onBiteTimer(sess.Userid)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if !st.Resolved || st.Pending != nil || st.PushSent {

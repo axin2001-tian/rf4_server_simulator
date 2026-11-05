@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 
 	"rf4server/internal/config"
@@ -22,14 +21,7 @@ type dlineTestEnv struct {
 
 func newDLineTestEnv(t *testing.T, uid int64) *dlineTestEnv {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "dline.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	db := openMigratedTestDB(t)
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "dline"}}, logging.Discard(), nil)
 	srv.SetDB(db)
 	sess := &Session{ID: 1, Userid: uid, Srv: srv, log: logging.Discard()}

@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"rf4server/internal/config"
 	"rf4server/internal/logging"
 	"rf4server/internal/proto"
-	"rf4server/internal/store"
 	"rf4server/internal/tunnel"
 )
 
@@ -373,15 +371,7 @@ func TestMiscHandlerContracts(t *testing.T) {
 // newMiscProbe 创建带探针数据库和服务器的测试会话。
 func newMiscProbe(t *testing.T) (*Server, *Session, context.Context) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "misc.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	importStaticForProbe(t, db)
+	db := openItemTestDB(t)
 	ctx := context.Background()
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "misc"}}, logging.Discard(), nil)
 	srv.SetDB(db)

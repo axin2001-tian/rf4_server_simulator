@@ -1,0 +1,19 @@
+{
+  "source": "22/1 housestore_003/housestore_012 实抓（2026-11-04 trace）+ 22/5 面板价格",
+  "rows": [
+    {
+      "store_id": "housestore_003",
+      "map_key": "level_003_viiveri_lake",
+      "item_id": "level_003_viiveri_lake_house",
+      "silver": 2800000,
+      "gold": 0
+    },
+    {
+      "store_id": "housestore_012",
+      "map_key": "level_012_north_sea",
+      "item_id": "level_012_north_sea_house",
+      "silver": 4400000,
+      "gold": 0
+    }
+  ]
+}

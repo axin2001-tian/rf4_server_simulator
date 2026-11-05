@@ -1,6 +1,7 @@
 package gameserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -16,7 +17,8 @@ import (
 const sonarAssetSHA256 = "19b44b49f001e1e59723b9a7ed659770acdf9ffdf0fdc35359e340dc8803fa5e"
 
 func TestSonarGridAsset(t *testing.T) {
-	gotHash := fmt.Sprintf("%x", sha256.Sum256(sonarGridsJSON))
+	normalized := bytes.ReplaceAll(sonarGridsJSON, []byte("\r\n"), []byte("\n"))
+	gotHash := fmt.Sprintf("%x", sha256.Sum256(normalized))
 	if gotHash != sonarAssetSHA256 {
 		t.Fatalf("声呐网格资产被改写: %s, 期望 %s", gotHash, sonarAssetSHA256)
 	}
@@ -73,8 +75,7 @@ func TestSonarSynthesisKnownWaterShape(t *testing.T) {
 
 	nonEmpty := 0
 	for idx, cell := range cells.Items {
-		// 空格两种编码都合法：0xFF（KindElemNull，旧）与 0x00（KindNull，现行）。
-		if cell.Kind == proto.KindElemNull || cell.Kind == proto.KindNull {
+		if cell.Kind == proto.KindElemNull {
 			continue
 		}
 		nonEmpty++
@@ -127,9 +128,7 @@ func TestSonarSynthesisWireRoundTrip(t *testing.T) {
 
 	foundEcho := false
 	for _, cell := range cells.Items {
-		// 空格两种编码都合法：0xFF（KindElemNull，旧）与 0x00（KindNull，
-		// 现行——客户端解码器没有 0xFF 分支，发 ElemNull 会抛 NotImplementedException）。
-		if cell == nil || cell.Kind == proto.KindElemNull || cell.Kind == proto.KindNull {
+		if cell == nil || cell.Kind == proto.KindElemNull {
 			continue
 		}
 		if cell.Class != sonarCellClass || cell.Field(0).Val.ArgCodeStr() != sonarEchoArgCode {
@@ -194,8 +193,8 @@ func TestSonarEchoSamplingRanges(t *testing.T) {
 
 func TestSonarHandlerReturnsEmbeddedGrid(t *testing.T) {
 	srv, _ := newRigTestServer(t)
-	// 默认 sonar_echo=0 只回空网格（客户端 4.0.25034 不认识 15004 会断线），
-	// 这里显式打开回声以验证网格生成逻辑本身。
+	// 默认 sonar_echo=0 只回空网格（客户端不认识 15004 会断线），这里显式打开
+	// 回声以验证网格生成逻辑本身。
 	if err := srv.DB.TunableSet(context.Background(), "sonar_echo", "1", "test"); err != nil {
 		t.Fatal(err)
 	}

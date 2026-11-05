@@ -7,7 +7,6 @@ package gameserver
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"rf4server/internal/config"
@@ -20,17 +19,9 @@ import (
 // newRigTestServer 创建测试服务器并导入 item_def 静态数据。
 func newRigTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rigflow.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	db := openItemTestDB(t)
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "rig"}}, logging.Discard(), nil)
 	srv.SetDB(db)
-	importStaticForProbe(t, db)
 	return srv, db
 }
 

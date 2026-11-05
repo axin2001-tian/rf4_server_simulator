@@ -436,3 +436,498 @@ func TestBrokenHandRodDeletesFloat(t *testing.T) {
 		t.Fatal("手竿断线后竿 f5 仍残留浮漂")
 	}
 }
+
+// 钩/拟饵等终端件断裂：组件耐久归零并离竿，竿本体与承力线不受影响
+// （回归：终端件断件上报此前会被物理裁决吞掉——有强度数据时误判为断线并
+// 连带丢失钩/饵/漂，无强度数据时兜底成断竿归零竿耐久）。
+func TestHookBreakDetachesComponentKeepsRod(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	rod, err := srv.CreateItem(ctx, uid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := srv.CreateItem(ctx, uid, "mono_40853", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := srv.CreateItem(ctx, uid, "clas_20163", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newProbeSess(srv)
+	mountGearForTest(t, srv, sess, rod.GUID, line.GUID)
+	res := srv.rigSetComponent(ctx, uid, rod.GUID, catHook, hook.GUID, 0,
+		rigSetOpts{ParentType: familyRod, EnforceCategory: true})
+	if res == nil || res.Rejected {
+		t.Fatalf("鱼钩装配被拒: %+v", res)
+	}
+	if got := rigSlotGUIDs(t, srv, rod.GUID); got[catHook] != hook.GUID {
+		t.Fatalf("鱼钩未装配: slot12=%s 期望 %s", got[catHook], hook.GUID)
+	}
+
+	tree := rigRequestTree(t, proto.Guid(rod.GUID), proto.Guid(hook.GUID), proto.U32(2), proto.Null())
+	body, ok := hDynamicRodBreak(&Ctx{Sess: sess, Main: 17, Sub: 9, Tree: tree,
+		DecodeOK: true, ExpectResponse: true, Log: logging.Discard()})
+	if !ok || len(body) == 0 {
+		t.Fatal("17/9 钩断未处理")
+	}
+	dec, _, err := proto.DecodeValue(body, 0, srv.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u64Of(dec.Fields[0].Num) != 0 {
+		t.Fatal("钩断响应 f0 应为 false（非断线）")
+	}
+	if got := dec.Fields[1].GuidHex(); got != hook.GUID {
+		t.Fatalf("钩断响应 f1=%s，期望 %s", got, hook.GUID)
+	}
+	if got := rigSlotGUIDs(t, srv, rod.GUID); got[catHook] != "" {
+		t.Fatalf("钩断后 rig_component 仍残留鱼钩: slot12=%s", got[catHook])
+	}
+	freshRod := mustItem(t, db, rod.GUID)
+	if _, ok := rigCompsOf(rigStoredF5(t, freshRod))[catHook]; ok {
+		t.Fatal("钩断后竿 f5 仍残留鱼钩")
+	}
+	if freshRod.Durability <= 0 {
+		t.Fatalf("钩断不应归零竿耐久: %v", freshRod.Durability)
+	}
+	freshHook := mustItem(t, db, hook.GUID)
+	if freshHook.Durability != 0 {
+		t.Fatalf("断钩耐久应归零: %v", freshHook.Durability)
+	}
+	if freshHook.Container != "backpack" || freshHook.RigGUID != "" || freshHook.Slot != 0 {
+		t.Fatalf("损坏组件应退回背包: container=%q rig_guid=%q slot=%d", freshHook.Container, freshHook.RigGUID, freshHook.Slot)
+	}
+	if got := rigStoredGUID(t, freshHook, csParent); got != "" {
+		t.Fatalf("损坏组件快照仍保留父件: %s", got)
+	}
+	// 等价重登后重建容器：按背包容器查询仍能读到该组件。
+	bagRows, err := srv.DB.ListItemsByContainer(ctx, uid, "backpack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backInBag := false
+	for _, row := range bagRows {
+		if row.GUID == hook.GUID {
+			backInBag = true
+			break
+		}
+	}
+	if !backInBag {
+		t.Fatal("重建背包容器后应能查询到损坏组件")
+	}
+	if mustItem(t, db, line.GUID) == nil {
+		t.Fatal("钩断不应影响鱼线")
+	}
+	logs, err := db.ListItemDamageLogs(ctx, uid, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, entry := range logs {
+		seen[entry.Event] = true
+	}
+	if !seen[damageEventComponentBreak] {
+		t.Fatalf("应记录 component_break: %+v", seen)
+	}
+	if seen[damageEventRodBreak] || seen[damageEventLineBreak] {
+		t.Fatalf("钩断不应记录 rod_break/line_break: %+v", seen)
+	}
+}
+
+func TestTerminalComponentProjectionOnlyBreakCleansProjection(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	rod, err := srv.CreateItem(ctx, uid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := srv.CreateItem(ctx, uid, "clas_20163", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟历史/部分同步状态：rig_component 有投影，但竿 f5 尚未包含该组件。
+	if err := db.SetItemRigLink(ctx, hook.GUID, rod.GUID, catHook); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertRigComponentAt(ctx, rod.GUID, catHook, 0, hook.GUID, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := srv.breakLineOrRod(ctx, uid, rod.GUID, hook.GUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.ComponentBroken {
+		t.Fatalf("应裁决为终端件断裂: %+v", outcome)
+	}
+	if got := rigSlotGUIDs(t, srv, rod.GUID)[catHook]; got != "" {
+		t.Fatalf("仅投影存在的组件断裂后仍残留 rig_component: %s", got)
+	}
+	freshHook := mustItem(t, db, hook.GUID)
+	if freshHook.Container != "backpack" || freshHook.RigGUID != "" || freshHook.Slot != 0 {
+		t.Fatalf("损坏组件应退回背包: container=%q rig_guid=%q slot=%d", freshHook.Container, freshHook.RigGUID, freshHook.Slot)
+	}
+	if got := rigStoredGUID(t, freshHook, csParent); got != "" {
+		t.Fatalf("损坏组件快照仍保留父件: %s", got)
+	}
+}
+
+func TestInvalidBreakReportPreservesCatchAndEquipment(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	sess := newProbeSess(srv)
+	uid := sess.Userid
+	create := func(owner int64, itemID string) string {
+		t.Helper()
+		row, err := srv.CreateItem(ctx, owner, itemID, "backpack", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.GUID
+	}
+	rod := create(uid, "feeder_10125_FD360")
+	line := create(uid, "mono_40853")
+	mountGearForTest(t, srv, sess, rod, line)
+	bell := mountGearForTest(t, srv, sess, rod, create(uid, "feeder_bell")).MountedGUID
+	otherRod := create(uid, "feeder_10125_FD360")
+	foreignRod := create(uid+1, "feeder_10125_FD360")
+	unmounted := create(uid, "mono_40853")
+	foreignHook := create(uid+1, "clas_20163")
+	otherLine := create(uid, "mono_40853")
+	mountGearForTest(t, srv, sess, otherRod, otherLine)
+	wrongSlot := create(uid, "clas_20163")
+	if err := db.UpsertRigComponentAt(ctx, rod, catFloat, 0, wrongSlot, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	st := srv.stateFor(uid)
+	pending := &RolledFish{Species: "perch"}
+	st.mu.Lock()
+	st.GearGuid, st.Pending, st.CastActive, st.Hooked = rod, pending, true, true
+	st.mu.Unlock()
+	length := lineLengthOfTestItem(t, srv, line)
+	before := mustItem(t, db, rod).Durability
+
+	for _, tc := range []struct {
+		name, target, part string
+	}{
+		{"unknown", rod, "ffffffffffffffffffffffffffffffff"},
+		{"foreign component", rod, foreignHook},
+		{"foreign rod", foreignRod, foreignRod},
+		{"unmounted line", rod, unmounted},
+		{"another rig's line", rod, otherLine},
+		{"unsupported mounted item", rod, bell},
+		{"wrong projection slot", rod, wrongSlot},
+		{"nonrod target", line, line},
+		{"undecoded request", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := &Ctx{Sess: sess, Main: 17, Sub: 9, ExpectResponse: true, Log: logging.Discard()}
+			if tc.target != "" {
+				request.Tree = rigRequestTree(t, proto.Guid(tc.target), proto.Guid(tc.part), proto.U32(1), proto.Null())
+				request.DecodeOK = true
+			}
+			result := srv.dispatch.executeRequest(request, true)
+			if !result.hasResponse || !result.nativeFailure {
+				t.Fatalf("无效断件没有返回协议错误: %+v", result)
+			}
+			st.mu.Lock()
+			unchanged := st.Pending == pending && st.CastActive && st.Hooked && !st.Resolved && st.GearGuid == rod
+			st.mu.Unlock()
+			if !unchanged || mustItem(t, db, rod).Durability != before || lineLengthOfTestItem(t, srv, line) != length {
+				t.Fatal("无效断件改变了钓获或装备")
+			}
+			logs, err := db.ListItemDamageLogs(ctx, uid, 20)
+			if err != nil || len(logs) != 0 {
+				t.Fatalf("无效断件写入了损坏记录: %+v %v", logs, err)
+			}
+		})
+	}
+}
+
+func TestBreakReportAcceptsMountedLoadComponents(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	sess := newProbeSess(srv)
+	uid := sess.Userid
+	create := func(id string) string {
+		t.Helper()
+		row, err := srv.CreateItem(ctx, uid, id, "backpack", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.GUID
+	}
+	rod := create("feeder_10125_FD360")
+	for _, id := range []string{"mono_40853", "spin_5820", "fc_leader_40048"} {
+		item := mountGearForTest(t, srv, sess, rod, create(id)).MountedGUID
+		if report, err := srv.validateBreakReport(ctx, uid, rod, item); err != nil || report.terminalCategory != 0 || report.embedded {
+			t.Fatalf("已装配的承力件 %s 没有交由承力规则: %+v %v", id, report, err)
+		}
+	}
+
+	factoryRod := create("spin_10158_M88HH")
+	factoryGUID := func(guid string) string {
+		t.Helper()
+		tree, err := srv.ItemToTree(ctx, mustItem(t, db, guid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := tree.Field(0).Val
+		if child == nil {
+			t.Fatal("缺少出厂竿件")
+		}
+		return child.Field(fieldIdxByCS(child.Class, csGUID)).Hex
+	}
+	if _, err := srv.breakLineOrRod(ctx, uid, factoryRod, factoryGUID(create("spin_10158_M88HH"))); err == nil {
+		t.Fatal("错误接收了另一把竿的出厂部件")
+	}
+	part := factoryGUID(factoryRod)
+	st := srv.stateFor(uid)
+	st.mu.Lock()
+	st.GearGuid = factoryRod
+	st.mu.Unlock()
+	request := &Ctx{Sess: sess, Main: 17, Sub: 9, DecodeOK: true, ExpectResponse: true, Log: logging.Discard(),
+		Tree: rigRequestTree(t, proto.Guid(zeroGUID), proto.Guid(part), proto.U32(1), proto.Null())}
+	result := srv.dispatch.executeRequest(request, true)
+	if !result.hasResponse || result.nativeFailure || result.failed {
+		t.Fatalf("该竿的出厂部件未走原有断竿响应: %+v", result)
+	}
+	decoded, _, err := proto.DecodeValue(result.body, 0, srv.Table())
+	if err != nil || decoded.TypeID != 11028 || decoded.Field(1).Hex != part {
+		t.Fatalf("断竿响应应指明经校验的出厂部件: %v %v", decoded, err)
+	}
+	if mustItem(t, db, factoryRod).Durability != 0 {
+		t.Fatal("已裁决断裂的母竿没有落库")
+	}
+	logs, err := db.ListItemDamageLogs(ctx, uid, 10)
+	if err != nil || len(logs) != 1 || logs[0].ItemGUID != factoryRod || logs[0].BrokenGUID != part {
+		t.Fatalf("出厂部件与母竿的损坏记录不一致: %+v %v", logs, err)
+	}
+}
+
+func TestTerminalComponentBreakRechecksAttachment(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	sess := newProbeSess(srv)
+	rod, err := srv.CreateItem(ctx, sess.Userid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := srv.CreateItem(ctx, sess.Userid, "clas_20163", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.breakComponentTx(ctx, sess.Userid, rod.GUID, hook.GUID, catHook); err == nil {
+		t.Fatal("事务接受了已卸下的组件")
+	}
+	if mustItem(t, db, hook.GUID).Durability != hook.Durability {
+		t.Fatal("事务损坏了未装配的组件")
+	}
+}
+
+// 断竿官方表现（回归：此前断竿不清线组，客户端鱼仍挂钩整轮卡死）：
+// 整组钓组与主线随竿报废进 11028 移除列表，竿耐久归零但物品保留。
+func TestRodBreakDestroysRigAndReturnsRemovedList(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	rod, err := srv.CreateItem(ctx, uid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := srv.CreateItem(ctx, uid, "mono_40853", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := srv.CreateItem(ctx, uid, "clas_20163", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobber, err := srv.CreateItem(ctx, uid, "bob_25001", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newProbeSess(srv)
+	mountGearForTest(t, srv, sess, rod.GUID, line.GUID)
+	mountGearForTest(t, srv, sess, rod.GUID, hook.GUID)
+	mountGearForTest(t, srv, sess, rod.GUID, bobber.GUID)
+
+	tree := rigRequestTree(t, proto.Guid(rod.GUID), proto.Guid(rod.GUID), proto.U32(1), proto.Null())
+	body, ok := hDynamicRodBreak(&Ctx{Sess: sess, Main: 17, Sub: 9, Tree: tree,
+		DecodeOK: true, ExpectResponse: true, Log: logging.Discard()})
+	if !ok || len(body) == 0 {
+		t.Fatal("17/9 断竿未处理")
+	}
+	dec, _, err := proto.DecodeValue(body, 0, srv.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := map[string]bool{}
+	if f4 := dec.Fields[4].Val; f4 != nil {
+		for _, it := range f4.Items {
+			removed[it.Hex] = true
+		}
+	}
+	for _, guid := range []string{line.GUID, hook.GUID, bobber.GUID} {
+		if row, _ := db.GetItemByGUID(ctx, guid); row != nil {
+			t.Fatalf("断竿后 %s 应随竿报废删除", guid)
+		}
+		if !removed[guid] {
+			t.Fatalf("断竿移除列表缺少 %s", guid)
+		}
+	}
+	if rows, _ := db.SQL.Query(`SELECT COUNT(*) FROM rig_component WHERE rig_guid=?`, rod.GUID); rows != nil {
+		var n int
+		_ = rows.Scan(&n)
+		_ = rows.Close()
+		if n != 0 {
+			t.Fatalf("断竿后 rig_component 残留 %d 行", n)
+		}
+	}
+	freshRod := mustItem(t, db, rod.GUID)
+	if freshRod.Durability != 0 {
+		t.Fatalf("断竿耐久应归零: %v", freshRod.Durability)
+	}
+	rodFields, _ := FieldsFromJSON(freshRod.FieldsJSON)
+	if i := fieldIdxByCS(freshRod.WireClass, csLine); i >= 0 && i < len(rodFields) && rodFields[i].GuidHex() != "" {
+		t.Fatal("断竿后竿 f3 应清空主线引用")
+	}
+	if _, hasHook := rigCompsOf(rigStoredF5(t, freshRod))[catHook]; hasHook {
+		t.Fatal("断竿后竿 f5 不应残留组件")
+	}
+	logs, _ := db.ListItemDamageLogs(ctx, uid, 50)
+	seen := map[string]int{}
+	for _, entry := range logs {
+		seen[entry.Event]++
+	}
+	if seen[damageEventRodBreak] != 1 {
+		t.Fatalf("rod_break 记录=%d，期望 1", seen[damageEventRodBreak])
+	}
+	if seen[damageEventLostOnRodBreak] != 3 {
+		t.Fatalf("lost_on_rod_break 记录=%d，期望 3（线+钩+漂）", seen[damageEventLostOnRodBreak])
+	}
+}
+
+// 断竿不可抛投（回归：客户端不理会 17/7 拒取仍持竿直发 14/2，
+// 线上日志确认断竿 7 秒后仍抛竿成功）。
+func TestBrokenRodCannotCast(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	rod, err := srv.CreateItem(ctx, uid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newProbeSess(srv)
+
+	// 健康竿：14/1 正常返回 158 带竿 GUID。
+	prep := rigRequestTree(t, proto.Guid(rod.GUID))
+	prepBody, ok := hCastPrepare(&Ctx{Sess: sess, Main: 14, Sub: 1, Tree: prep,
+		DecodeOK: true, ExpectResponse: true, Log: logging.Discard()})
+	if !ok || len(prepBody) == 0 {
+		t.Fatal("健康竿 14/1 未处理")
+	}
+	dec, _, err := proto.DecodeValue(prepBody, 0, srv.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthyF0 := dec.Field(0)
+	if got := healthyF0.GuidHex(); got != rod.GUID {
+		t.Fatalf("健康竿 158.f0=%s，期望 %s", got, rod.GUID)
+	}
+
+	// 断竿后：14/1 返回空 GUID。
+	if err := db.SetItemDurability(ctx, rod.GUID, 0); err != nil {
+		t.Fatal(err)
+	}
+	st := srv.stateFor(uid)
+	st.mu.Lock()
+	st.GearGuid = rod.GUID
+	st.mu.Unlock()
+	prepBody2, ok := hCastPrepare(&Ctx{Sess: sess, Main: 14, Sub: 1, Tree: prep,
+		DecodeOK: true, ExpectResponse: true, Log: logging.Discard()})
+	if !ok || len(prepBody2) == 0 {
+		t.Fatal("断竿 14/1 未处理")
+	}
+	dec2, _, err := proto.DecodeValue(prepBody2, 0, srv.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenF0 := dec2.Field(0)
+	if got := brokenF0.GuidHex(); got != zeroGUID {
+		t.Fatalf("断竿 14/1 应返回空 GUID，实得 %s", got)
+	}
+	st.mu.Lock()
+	gearNow := st.GearGuid
+	st.mu.Unlock()
+	if gearNow != "" {
+		t.Fatalf("断竿 14/1 后 GearGuid 应清空，实得 %s", shortGUID(gearNow))
+	}
+
+	// 断竿直发 14/2：回失败，不进入抛竿状态。
+	st.mu.Lock()
+	st.GearGuid = rod.GUID
+	st.mu.Unlock()
+	castTree := proto.Args524(proto.Guid(rod.GUID))
+	capture := &ctxReplyCapture{}
+	body3, ok := hCast(&Ctx{Sess: sess, Main: 14, Sub: 2, Tree: castTree,
+		DecodeOK: true, ExpectResponse: true, replyCapture: capture, Log: logging.Discard()})
+	if !ok || body3 != nil {
+		t.Fatalf("断竿 14/2 应回失败且无成功体: ok=%v body=%v", ok, body3 != nil)
+	}
+	st.mu.Lock()
+	castActive := st.CastActive
+	st.mu.Unlock()
+	if castActive {
+		t.Fatal("断竿 14/2 不得进入抛竿状态")
+	}
+}
+
+// 断竿不可组装配件（回归：此前只拦"耐久 0 配件上竿"，没拦"往断竿上装配件"）。
+func TestBrokenRodRejectsComponentMount(t *testing.T) {
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	rod, err := srv.CreateItem(ctx, uid, "tele_10012_tl16", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := srv.CreateItem(ctx, uid, "mono_40853", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemDurability(ctx, rod.GUID, 0); err != nil {
+		t.Fatal(err)
+	}
+	res := srv.rigSetComponent(ctx, uid, rod.GUID, catLine, line.GUID, 0,
+		rigSetOpts{ParentType: familyRod, EnforceCategory: true})
+	if res == nil || !res.Rejected {
+		t.Fatalf("断竿应禁止装配线组: %+v", res)
+	}
+	if rows, _ := db.SQL.Query(`SELECT COUNT(*) FROM rig_component WHERE rig_guid=?`, rod.GUID); rows != nil {
+		var n int
+		_ = rows.Scan(&n)
+		_ = rows.Close()
+		if n != 0 {
+			t.Fatalf("断竿装配被拒后不应有 rig_component 残留: %d", n)
+		}
+	}
+	// 修理后恢复可装。
+	if err := db.SetItemDurability(ctx, rod.GUID, 1); err != nil {
+		t.Fatal(err)
+	}
+	sess := newProbeSess(srv)
+	if res := mountGearForTest(t, srv, sess, rod.GUID, line.GUID); res == nil {
+		t.Fatal("修理后应恢复装配")
+	}
+}

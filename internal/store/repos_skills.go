@@ -55,36 +55,44 @@ func (d *DB) GetSkillPoints(ctx context.Context, uid, skillID int64) (float64, e
 
 // GetSkillNode 返回节点当前等级；无记录时返回 0。
 func (d *DB) GetSkillNode(ctx context.Context, uid, nodeID int64) (int64, error) {
-	var lv int64
-	err := d.SQL.QueryRowContext(ctx,
-		`SELECT level FROM skill_node WHERE uid=? AND node_id=?`, uid, nodeID).Scan(&lv)
+	nodes, err := d.ListSkillNodes(ctx, uid)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
 		return 0, err
 	}
-	return lv, nil
+	return nodes[nodeID], nil
 }
 
-// SetSkillNode 写入节点等级；同一节点使用 UPSERT 覆盖。
+// SetSkillNode 写入节点等级，并同步同身份的全部节点。
 func (d *DB) SetSkillNode(ctx context.Context, uid, nodeID, level int64) error {
-	_, err := d.SQL.ExecContext(ctx, `
-		INSERT INTO skill_node(uid, node_id, level) VALUES(?,?,?)
-		ON CONFLICT (uid, node_id) DO UPDATE SET level=?`,
-		uid, nodeID, level, level)
-	return err
+	ident, err := d.LoadSkillIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, node := range ident.Group(nodeID) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO skill_node(uid,node_id,level) VALUES(?,?,?)
+			ON CONFLICT(uid,node_id) DO UPDATE SET level=excluded.level`, uid, node, level); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// SkillNodeLevelSum 返回玩家所有技能节点的等级总和，即已投入的技能点。
+// SkillNodeLevelSum 返回永久已投入点数，共享节点只计一份。
 func (d *DB) SkillNodeLevelSum(ctx context.Context, uid int64) (int64, error) {
-	var sum sql.NullInt64
-	err := d.SQL.QueryRowContext(ctx,
-		`SELECT SUM(level) FROM skill_node WHERE uid=?`, uid).Scan(&sum)
+	nodes, err := d.listRawSkillNodes(ctx, uid)
 	if err != nil {
 		return 0, err
 	}
-	return sum.Int64, nil
+	ident, err := d.LoadSkillIdentity(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return ident.SpentPoints(nodes), nil
 }
 
 // DeleteSkillNodes 删除玩家的全部技能节点等级。

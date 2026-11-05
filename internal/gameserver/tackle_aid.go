@@ -91,10 +91,12 @@ func (s *Server) tackleAidItemsFor(ctx context.Context, place, kind string) ([]t
 	return fallback, fallback != nil
 }
 
-// grantTackleAid 发放一套备用渔具：逐件落库、分配空槽，并推给客户端。
+// grantTackleAid 发放一套备用渔具：逐件落库、分配背包空槽，并推给客户端。
 func (s *Server) grantTackleAid(ctx context.Context, c *Ctx, uid int64, items []tackleAidItem) int {
-	slot, err := s.DB.NextFreeSlot(ctx, uid, "backpack")
-	if err != nil {
+	var slot int64
+	if err := s.DB.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(slot),-1)+1 FROM item WHERE uid=? AND container='backpack'`,
+		uid).Scan(&slot); err != nil {
 		c.Log.Warn("备用渔具取空槽失败", "err", err)
 		return 0
 	}
@@ -109,7 +111,8 @@ func (s *Server) grantTackleAid(ctx context.Context, c *Ctx, uid int64, items []
 			c.Log.Warn("备用渔具发放失败", "item", it.ItemID, "err", gerr)
 			continue
 		}
-		if serr := s.DB.SetItemSlot(ctx, row.GUID, slot); serr != nil {
+		if _, serr := s.DB.SQL.ExecContext(ctx,
+			`UPDATE item SET slot=? WHERE guid=?`, slot, row.GUID); serr != nil {
 			c.Log.Warn("备用渔具槽位设置失败", "item", it.ItemID, "slot", slot, "err", serr)
 		}
 		slot++
@@ -137,7 +140,7 @@ func hTackleAid(ctx *Ctx) ([]byte, bool) {
 		kind = "spin"
 		name = "纺车竿渔具"
 	}
-	cctx := srv.dbCtx()
+	cctx := ctx.Sess.pushCtx()
 	place := srv.currentLevel(ctx.Sess.Userid)
 	items, ok := srv.tackleAidItemsFor(cctx, place, kind)
 	if !ok || len(items) == 0 {

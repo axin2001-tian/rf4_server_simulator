@@ -192,6 +192,9 @@ var canonicalRigIndex = func() map[int64]int64 {
 
 // slotIndicesFor 返回指定钓组类型和品类对应的规范索引列表。
 func slotIndicesFor(rigType, category int64) []int64 {
+	if category == 27 && rigType != 0 && len(slotIndicesFor(rigType, catHook)) <= 1 {
+		return []int64{350, 351}
+	}
 	tpl := rigSlotTemplates[rigType]
 	if len(tpl) == 0 {
 		return nil
@@ -230,6 +233,12 @@ func canonicalIndex(category, clientIndex int64, rigType int64) int64 {
 // canonicalIndexForOrdinal 返回同品类第 ordinal 个实例的规范索引。
 // 合法客户端索引优先，否则使用模板中对应序号的槽。
 func canonicalIndexForOrdinal(category, clientIndex, rigType, ordinal int64) int64 {
+	if category == 27 {
+		if ordinal == 1 && len(slotIndicesFor(rigType, catHook)) <= 1 {
+			return 351
+		}
+		return 350
+	}
 	if rigType != 0 {
 		idxs := slotIndicesFor(rigType, category)
 		for _, idx := range idxs {
@@ -276,6 +285,8 @@ func rigCompsOf(f5 *proto.Value) map[int64]rigComp {
 	if comps == nil {
 		return out
 	}
+	_, rigType, _ := rigIdentity(f5)
+	singleHook := len(slotIndicesFor(rigType, catHook)) <= 1
 	counts := map[int64]int64{}
 	for _, it := range comps.Items {
 		if it == nil || it.Kind != proto.KindObj {
@@ -288,6 +299,16 @@ func rigCompsOf(f5 *proto.Value) map[int64]rigComp {
 		}
 		cat := int64(f0.U32())
 		ordinal := counts[cat]
+		if cat == 27 && singleHook {
+			switch f2.U32() {
+			case 351:
+				ordinal = 1
+			case 350:
+				if _, occupied := out[rigCompKey(cat, 0)]; !occupied {
+					ordinal = 0
+				}
+			}
+		}
 		counts[cat] = ordinal + 1
 		out[rigCompKey(cat, ordinal)] = rigComp{
 			Category: cat, Ordinal: ordinal, GUID: g, Extra: int64(f2.U32()),
@@ -659,6 +680,21 @@ func (s *Server) setWireParent(ctx context.Context, row *store.Item, parentGUID 
 	s.saveItemFields(ctx, row, fields)
 }
 
+// clearRigFieldsForBackpack 清理物品快照中的装配引用，使客户端按背包物品解析。
+// 调用方负责落库；事务路径随后由 updateItemFieldsTx 更新时间戳。
+func clearRigFieldsForBackpack(fields []proto.Field, wireClass string) {
+	if p := fieldIdxByCS(wireClass, csParent); p >= 0 && p < len(fields) &&
+		(fields[p].Op == "OPTGUID" || fields[p].Op == "GUID16") {
+		fields[p].Hex = ""
+	}
+	if source := fieldIdxByCS(wireClass, csSplitSource); source >= 0 && source < len(fields) {
+		fields[source].Hex = ""
+	}
+	if sidx := fieldIdxByCS(wireClass, csSlotEnum); sidx >= 0 && fieldOpAt(wireClass, sidx) == "BYTE" {
+		fields[sidx].Num = ptrU64(0) // 背包
+	}
+}
+
 // returnToBackpack 将普通物品退回背包，并清空 rig_guid 和 wire 父引用。
 // 父引用不清空时，客户端会继续把物品视为已挂载。
 // 存储更新统一走 DetachReturnToBackpack，字段更新后再整体落库。
@@ -668,19 +704,22 @@ func (s *Server) returnToBackpack(ctx context.Context, row *store.Item) {
 	if err != nil {
 		return
 	}
-	if p := fieldIdxByCS(row.WireClass, csParent); p >= 0 && p < len(fields) &&
-		(fields[p].Op == "OPTGUID" || fields[p].Op == "GUID16") {
-		fields[p].Hex = ""
-	}
-	if sidx := fieldIdxByCS(row.WireClass, csSlotEnum); sidx >= 0 && fieldOpAt(row.WireClass, sidx) == "BYTE" {
-		fields[sidx].Num = ptrU64(0) // 背包
-	}
+	clearRigFieldsForBackpack(fields, row.WireClass)
 	bumpCreatedTicks(fields, row.WireClass)
 	fj, jerr := FieldsToJSON(fields)
 	if jerr != nil {
 		return
 	}
 	_ = s.DB.UpdateItemFields(ctx, row.GUID, fj, row.Qty, row.Durability, row.Workmanship, "")
+}
+
+// refundableSplitChild 只向仍在背包的同类来源堆退回数量。
+func (s *Server) refundableSplitChild(ctx context.Context, row *store.Item) bool {
+	if !s.isSplitChild(ctx, row) {
+		return false
+	}
+	source, err := s.DB.GetItemByGUID(ctx, splitSourceGUID(row))
+	return err == nil && source != nil && source.UID == row.UID && source.NumericID == row.NumericID && source.Container == "backpack" && source.RigGUID == "" && source.Qty > 0
 }
 
 // splitSourceGUID 返回拆分子实例的来源堆 GUID。
@@ -834,6 +873,33 @@ func (s *Server) materializeHanditemChild(ctx context.Context, uid int64, parent
 	return childGUID, itemGUID
 }
 
+// baitFullStackRod 判断 parentGUID 是否适用钩饵整包装填。
+// 浮钓/沉底族单钩钓组整包上饵；多钩钓组（模板钩槽数 >1 或实际挂载钩 >1，
+// 如串钩、多钩水底）保持一钩一份的逐份拆分配饵。竿缺失或钓组类型未知时
+// 保守返回 false，维持原拆分路径。
+func (s *Server) baitFullStackRod(ctx context.Context, parentGUID string) bool {
+	if s.DB == nil || parentGUID == "" {
+		return false
+	}
+	prow, err := s.DB.GetItemByGUID(ctx, parentGUID)
+	if err != nil || prow == nil {
+		return false
+	}
+	rigType := s.rigTypeOfItem(ctx, prow)
+	if !baitFullStackRigTypes[rigType] {
+		return false
+	}
+	if len(slotIndicesFor(rigType, catHook)) > 1 || len(slotIndicesFor(rigType, catLure)) > 1 {
+		return false
+	}
+	// 模板可能不反映实际挂载：已挂第二口钩时同样降级（与
+	// consumeBaitEvent 的多钩分支用同一计数方式）。
+	if comps := s.storedRigComponents(ctx, parentGUID); len(rigCompKeysOfCategory(comps, catHook)) > 1 {
+		return false
+	}
+	return true
+}
+
 // setHanditemLoadedRef 将手持工具字段 f1 设为当前装填物 GUID；空字符串表示清空。
 // 客户端通过该字段判断装填状态。
 func (s *Server) setHanditemLoadedRef(ctx context.Context, parentGUID, itemGUID string) {
@@ -880,6 +946,7 @@ func (s *Server) handitemLoadedGuid(ctx context.Context, parentGUID string) stri
 
 // rigSetOpts 保存装配操作的选项。
 type rigSetOpts struct {
+	KeepRebait        bool // 自动补挂成功后由调用方删除原请求。
 	ParentType        int  // 命令族号（13/15/16/17），不是钓组种类
 	EnforceCategory   bool // 显式槽位 ≠ 物品品类时用 fits_slot 校验（17/3/单测路径）
 	SplitStack        bool // 计件物品挂载拆分（钓竿必须拆分；手持工具例外）
@@ -894,6 +961,8 @@ type rigSetResult struct {
 	AddedTrees   []*proto.Value // nil 表示无新增段（非拆分挂载时 f0 为 null）
 	UpdatedTrees []*proto.Value
 	RemovedGUIDs []string
+	SourceGUID   string       // 拆分挂载后的来源堆 guid（回包后强制刷新客户端计数）
+	SourceTree   *proto.Value // 来源堆减一后的新树
 }
 
 // hasMaterials 判断装配是否产生了新增、更新或移除。
@@ -922,6 +991,15 @@ func (s *Server) rigSetComponent(ctx context.Context, uid int64, parentGUID stri
 			"durability", it.Durability, "category", itemCat)
 		res.Rejected = true
 		return res
+	}
+	// 断竿不能继续装配：竿耐久归零后须先修理，再重组线组。
+	if prow, perr := s.DB.GetItemByGUID(ctx, parentGUID); perr == nil && prow != nil {
+		if pcat, _ := s.itemCategoryOf(ctx, prow); pcat == gearCatRod && prow.Durability <= 0 {
+			s.log.Warn("装配被拒：父竿已损坏", "parent", shortGUID(parentGUID),
+				"durability", prow.Durability)
+			res.Rejected = true
+			return res
+		}
 	}
 	if slot <= 0 && hasCat {
 		slot = itemCat // 槽位 = 物品品类（17/2 请求无槽位，见模块头注）
@@ -954,18 +1032,37 @@ func (s *Server) rigSetComponent(ctx context.Context, uid int64, parentGUID stri
 		_ = s.DB.UpsertRig(ctx, parentGUID, uid, 1, "", "{}")
 	}
 
-	// 计件物品先拆出数量为 1 的挂载子实例；整堆挂载会导致客户端配重错误。
-	// 手持工具例外，需要保留整堆份数。
-	if opts.SplitStack {
-		itemGUID = s.splitMountableChild(ctx, uid, parentGUID, itemGUID)
-	}
-
 	// 800 快照素材：f0 新增，f1 更新（含竿），f2 移除原有子实例 GUID。
 	added := []*proto.Value(nil)
 	updated := []*proto.Value{}
 	var removed []string
 	materialized := false
-	if opts.HanditemFullStack {
+	// 计件物品挂载分三种：
+	//   * 浮钓/沉底单钩饵料（qty>1）：整包装填进新子实例，咬口逐份扣减；
+	//   * 其余计件物品：拆出数量为 1 的挂载子实例，并刷新来源堆；
+	//   * 手持工具：整堆装填搬进新子实例。
+	if opts.SplitStack && itemCat == catBait && s.stackCountOf(ctx, it) > 1 && s.baitFullStackRod(ctx, parentGUID) {
+		g, srcRemoved := s.materializeHanditemChild(ctx, uid, parentGUID, itemGUID)
+		itemGUID = g
+		if srcRemoved != "" {
+			removed = append(removed, srcRemoved)
+			materialized = true
+		}
+	} else if opts.SplitStack {
+		sourceGUID := itemGUID
+		itemGUID = s.splitMountableChild(ctx, uid, parentGUID, itemGUID)
+		if itemGUID != sourceGUID {
+			// 拆分把来源堆数量减一。客户端只按「新增/移除」更新背包计数，
+			// 这里同时提供新树（回包 f1）和回包后的移除+重加刷新。
+			if src, serr := s.DB.GetItemByGUID(ctx, sourceGUID); serr == nil && src != nil {
+				if t, terr := s.itemTree(ctx, src); terr == nil {
+					res.SourceGUID = sourceGUID
+					res.SourceTree = t
+					updated = append(updated, t)
+				}
+			}
+		}
+	} else if opts.HanditemFullStack {
 		g, srcRemoved := s.materializeHanditemChild(ctx, uid, parentGUID, itemGUID)
 		itemGUID = g
 		if srcRemoved != "" {
@@ -976,9 +1073,13 @@ func (s *Server) rigSetComponent(ctx context.Context, uid int64, parentGUID stri
 
 	// 同品类多槽时由实例 f5 选择空闲序号；只有目标序号已占用时才替换现有组件。
 	ordinal, oldGUID := s.rigSetTarget(ctx, parentGUID, slot, itemGUID, extra)
+	oldHook := ""
+	if slot == catBait || slot == catLure {
+		oldHook, _ = s.DB.GetRodSetting(ctx, parentGUID, "bait_hook:"+oldGUID)
+	}
 	if oldGUID != "" && oldGUID != itemGUID {
 		if prev, oerr := s.DB.GetItemByGUID(ctx, oldGUID); oerr == nil && prev != nil {
-			if s.isSplitChild(ctx, prev) {
+			if s.refundableSplitChild(ctx, prev) {
 				// 原有挂载是拆分子实例：整条删除，并把 1 个单位退回来源堆。
 				srcGUID := splitSourceGUID(prev)
 				_ = s.DB.DeleteItems(ctx, []string{oldGUID})
@@ -1016,6 +1117,15 @@ func (s *Server) rigSetComponent(ctx context.Context, uid int64, parentGUID stri
 	// 顺序反过来会导致拆卸只删索引，实例中仍保留组件。
 	s.rigComponentWriteAt(ctx, parentGUID, slot, ordinal, itemGUID, extra)
 	_ = s.DB.SetItemRigLink(ctx, itemGUID, parentGUID, slot)
+	if slot == 27 && !opts.KeepRebait {
+		_, _ = s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND key=?`, parentGUID, fmt.Sprintf("rebait:%d", ordinal))
+	}
+
+	if slot == catBait || slot == catLure {
+		if err := s.rememberMountedBaitHook(ctx, parentGUID, itemGUID, oldHook, slot, ordinal); err != nil {
+			s.log.Warn("钩饵关联保存失败", "err", err)
+		}
+	}
 
 	// 手持工具将装填物 GUID 写入父实例 f1。
 	if opts.ParentType == familyHanditem && itemGUID != "" {
@@ -1096,6 +1206,14 @@ func (s *Server) rigSetTarget(ctx context.Context, parentGUID string, slot int64
 			return 0, comp.GUID
 		}
 		return 0, ""
+	}
+	// 天然饵只有显式第二饵位才组成双饵；普通换饵仍替换第一饵。
+	if slot == 27 {
+		ordinal := int64(0)
+		if slotCount := int64(baitSlotCount(s.rigTypeForWrite(ctx, parentGUID))); extra > 350 && extra < 350+slotCount {
+			ordinal = extra - 350
+		}
+		return ordinal, comps[rigCompKey(slot, ordinal)].GUID
 	}
 	idxs := slotIndicesFor(s.rigTypeForWrite(ctx, parentGUID), slot)
 	if extra != 0 {
@@ -1261,7 +1379,7 @@ func (s *Server) rigItemMutate(ctx context.Context, rodGUID string, slot *int64,
 	}
 
 	fields[idx].Op = "VAL"
-	fields[idx].Val = buildRig153WithClip(name, curType, comps, curDepth, rigClipOf(stored))
+	fields[idx].Val = buildRig153Like(stored, name, curType, comps, curDepth, rigClipOf(stored))
 	s.saveItemFields(ctx, row, fields)
 	_ = s.reconcileRigProjection(ctx, rodGUID)
 	if curType != originalType {
@@ -1316,7 +1434,7 @@ func (s *Server) rigItemDeleteComponentAt(ctx context.Context, rodGUID string, s
 	}
 	depth := rigDepthOf(stored, defaultDepthFor(name, curType))
 	fields[idx].Op = "VAL"
-	fields[idx].Val = buildRig153WithClip(name, curType, comps, depth, rigClipOf(stored))
+	fields[idx].Val = buildRig153Like(stored, name, curType, comps, depth, rigClipOf(stored))
 	s.saveItemFields(ctx, row, fields)
 	_ = s.reconcileRigProjection(ctx, rodGUID)
 	return true
@@ -1331,6 +1449,7 @@ type rigDetachResult struct {
 	DeletedGUID  string       // 整条删除的子实例 guid（f2 移除段素材；退回路径为空）
 	ReturnedTree *proto.Value // 退回背包物品的新树（f1 更新段素材）
 	SourceTree   *proto.Value // 拆分子实例来源堆 +1 后的新树（f1 更新段素材）
+	SourceGUID   string       // 拆分子实例的来源堆 guid（回包后强制刷新客户端计数）
 }
 
 // trees 是应进入 f1 的物品树。
@@ -1437,9 +1556,12 @@ func (s *Server) rigDetach(ctx context.Context, parentGUID string, slot int64, c
 // rigDetachAt 精确摘除指定品类和序号对应的实例。
 func (s *Server) rigDetachAt(ctx context.Context, parentGUID string, slot, ordinal int64, compGUID string) *rigDetachResult {
 	res := &rigDetachResult{CompGUID: compGUID}
+	if slot == 27 {
+		_, _ = s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND key=?`, parentGUID, fmt.Sprintf("rebait:%d", ordinal))
+	}
 	if compGUID != "" {
 		if prev, oerr := s.DB.GetItemByGUID(ctx, compGUID); oerr == nil && prev != nil {
-			if s.isSplitChild(ctx, prev) {
+			if s.refundableSplitChild(ctx, prev) {
 				// 拆分子实例整条删除，并把一个单位退回来源堆。
 				srcGUID := splitSourceGUID(prev)
 				_ = s.DB.DeleteItems(ctx, []string{compGUID})
@@ -1449,6 +1571,7 @@ func (s *Server) rigDetachAt(ctx context.Context, parentGUID string, slot, ordin
 						s.setStackCount(ctx, src, s.stackCountOf(ctx, src)+1)
 						if fresh, ferr := s.DB.GetItemByGUID(ctx, srcGUID); ferr == nil && fresh != nil {
 							res.SourceTree, _ = s.itemTree(ctx, fresh)
+							res.SourceGUID = srcGUID
 						}
 					}
 				}
@@ -1475,6 +1598,7 @@ func (s *Server) rigDetachAt(ctx context.Context, parentGUID string, slot, ordin
 
 // rigRemoveAll 拆下父对象上的全部组件。
 func (s *Server) rigRemoveAll(ctx context.Context, uid int64, parentGUID string) []*rigDetachResult {
+	_, _ = s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND key LIKE 'rebait:%'`, parentGUID)
 	rows, _ := s.DB.ListRigComponents(ctx, parentGUID)
 	comps := s.storedRigComponents(ctx, parentGUID)
 	seen := map[string]bool{}
@@ -1677,6 +1801,50 @@ func (s *Server) buildRigSnapshotForParent(ctx context.Context, parentGUID, item
 	return buildRigSnapshot800(added, updated, removed)
 }
 
+// queueSourceStackRefresh 在响应写回后强制刷新来源堆的客户端计数。
+// 客户端只对「移除 + 新增」更新背包数量，同 guid 的数量更新会被忽略；
+// 因此退回拆分子实例后要先 4/21 移除旧栈，再用 4/22 重新加入新数量的树。
+func (s *Server) queueSourceStackRefresh(ctx *Ctx, results ...*rigDetachResult) {
+	if ctx == nil {
+		return
+	}
+	var guids []string
+	var trees []*proto.Value
+	seen := map[string]bool{}
+	for _, res := range results {
+		if res == nil || res.SourceGUID == "" || res.SourceTree == nil || seen[res.SourceGUID] {
+			continue
+		}
+		seen[res.SourceGUID] = true
+		guids = append(guids, res.SourceGUID)
+		trees = append(trees, res.SourceTree)
+	}
+	if len(guids) == 0 {
+		return
+	}
+	s.queueStackRefresh(ctx, guids, trees)
+}
+
+// queueStackRefresh 在回包后「先移除再重新加入」背包栈，强制客户端采用新数量。
+func (s *Server) queueStackRefresh(ctx *Ctx, guids []string, trees []*proto.Value) {
+	if ctx == nil || len(guids) == 0 || len(trees) == 0 {
+		return
+	}
+	sess := ctx.Sess
+	ctx.AfterResponse(func() {
+		sess.Push4_21(guids)
+		sess.Push(4, 22, proto.Args(proto.S("61"), trees...))
+	})
+}
+
+// queueSplitSourceRefresh 在回包后刷新拆分挂载的来源堆计数。
+func (s *Server) queueSplitSourceRefresh(ctx *Ctx, res *rigSetResult) {
+	if res == nil || res.SourceGUID == "" || res.SourceTree == nil {
+		return
+	}
+	s.queueStackRefresh(ctx, []string{res.SourceGUID}, []*proto.Value{res.SourceTree})
+}
+
 // buildDetachSnapshot 构造单件拆卸的响应快照：
 // f1 包含退回树和竿，f2 包含整条删除的子实例 GUID。
 func (s *Server) buildDetachSnapshot(ctx context.Context, parentGUID string, res *rigDetachResult) *proto.Value {
@@ -1756,7 +1924,7 @@ func (s *Server) liveRig153(ctx context.Context, row *store.Item, storedF5 *prot
 	if saved, ok := s.savedReelClipM(ctx, row.GUID); ok {
 		clipM = saved
 	}
-	return buildRig153WithClip(name, curType, comps, depth, clipM)
+	return buildRig153Like(storedF5, name, curType, comps, depth, clipM)
 }
 
 // buildRigObject 构造当前钓组的 157 对象。
@@ -1860,7 +2028,8 @@ func (s *Server) rigItem157Fallback(ctx context.Context, uid int64, rigGUID stri
 	if saved, ok := s.savedReelClipM(ctx, rigGUID); ok {
 		clipM = saved
 	}
-	f5 := buildRig153WithClip(name, rigType, comps, defaultDepthFor(name, rigType), clipM)
+	f5 := buildRig153Full(name, rigType, comps, defaultDepthFor(name, rigType), clipM,
+		s.baitMountFor(ctx, rigGUID), defaultBaitMountAvail)
 	vals := map[int]*proto.Value{
 		3:  proto.Guid(lineGUID),
 		5:  f5,
@@ -2089,6 +2258,9 @@ func hRodTake(ctx *Ctx) ([]byte, bool) {
 		rod = guids[0]
 	}
 	st := srv.stateFor(ctx.Sess.Userid)
+	if !srv.pendingCatchAllowsCast(ctx, st) {
+		return nil, true
+	}
 	st.mu.Lock()
 	if rod != "" {
 		st.GearGuid = rod
@@ -2097,14 +2269,6 @@ func hRodTake(ctx *Ctx) ([]byte, bool) {
 	depthCM := st.DepthCM
 	rigType := st.RigType
 	st.mu.Unlock()
-	if rigType == 0 && gear != "" {
-		if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear); err == nil && row != nil {
-			rigType = srv.rigTypeOfItem(ctx.Sess.pushCtx(), row)
-			st.mu.Lock()
-			st.RigType = rigType
-			st.mu.Unlock()
-		}
-	}
 
 	if gear == "" {
 		// 没有可取竿时返回全零 GUID。
@@ -2113,11 +2277,16 @@ func hRodTake(ctx *Ctx) ([]byte, bool) {
 		}
 		return nil, false
 	}
-	if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear); err != nil || row == nil || row.Durability <= 0 {
+	row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear)
+	category, categoryKnown := int64(0), false
+	if row != nil {
+		category, categoryKnown = srv.itemCategoryOf(ctx.Sess.pushCtx(), row)
+	}
+	if err != nil || row == nil || row.UID != ctx.Sess.Userid || row.Durability <= 0 || !categoryKnown || category != gearCatRod {
 		st.mu.Lock()
 		st.GearGuid = ""
 		st.mu.Unlock()
-		ctx.Log.Info("取竿被拒：鱼竿已损坏", "rod", shortGUID(gear))
+		ctx.Log.Info("取竿被拒：鱼竿无效或已损坏", "rod", shortGUID(gear))
 		if body := castReady158(ctx, "", depthCM, 0); body != nil {
 			return body, true
 		}
@@ -2127,6 +2296,16 @@ func hRodTake(ctx *Ctx) ([]byte, bool) {
 	if srv.ensureRig(ctx.Sess.pushCtx(), ctx.Sess.Userid, gear) {
 		ctx.Sess.Push4_22Full()
 	}
+	// 每次换竿都读取该竿的钓组，不能沿用上一根竿的浮钓/路亚类型。
+	row, err = srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), gear)
+	if err != nil || row == nil {
+		ctx.ReplyFailure("System.IO.IOException", "鱼竿状态未能读取，请重试")
+		return nil, true
+	}
+	rigType = srv.rigTypeOfItem(ctx.Sess.pushCtx(), row)
+	st.mu.Lock()
+	st.RigType = rigType
+	st.mu.Unlock()
 	body := castReady158(ctx, gear, depthCM, rigType)
 	if body == nil {
 		return nil, false
@@ -2170,6 +2349,7 @@ func hRodSetComp(ctx *Ctx) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSplitSourceRefresh(ctx, res)
 	return body, true
 }
 
@@ -2206,6 +2386,7 @@ func hRodRemoveComp(ctx *Ctx) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSourceStackRefresh(ctx, res)
 	return body, true
 }
 
@@ -2228,6 +2409,7 @@ func hRigRemoveAll(ctx *Ctx) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSourceStackRefresh(ctx, results...)
 	return body, true
 }
 
@@ -2272,8 +2454,14 @@ func hRigBaitMount(ctx *Ctx) ([]byte, bool) {
 	}
 	cctx := ctx.Sess.pushCtx()
 	if len(ints) > 1 {
-		mask := ints[len(ints)-1]
-		_ = srv.DB.UpsertRodSetting(cctx, guids[0], "baitmount", strconv.FormatInt(int64(mask), 10))
+		mask := clampBaitMount(int64(ints[len(ints)-1]))
+		// 客户端 17/6 只带一个整数，没有语义名；落库前先记一条，
+		// 便于把「卡片 ↔ 数值」对上（BaitMountType 取值尚未逐个确认）。
+		ctx.Log.Info("17/6 挂饵方式", "rod", shortGUID(guids[0]), "mask", mask, "guids", len(guids), "ints", len(ints))
+		_ = srv.DB.UpsertRodSetting(cctx, guids[0], baitMountSettingKey, strconv.FormatInt(mask, 10))
+		if err := srv.applyRigBaitMount(cctx, guids[0], mask); err != nil {
+			ctx.Log.Warn("写入挂饵方式失败", "rod", shortGUID(guids[0]), "mask", mask, "err", err)
+		}
 	}
 	body, err := proto.EncodeValue(srv.buildRigSnapshotFull(cctx, ctx.Sess.Userid), ctx.Sess.Table())
 	if err != nil {
@@ -2298,12 +2486,13 @@ func hLureSetComp(ctx *Ctx) ([]byte, bool) {
 		extra = int64(ints[1])
 	}
 	cctx := ctx.Sess.pushCtx()
-	srv.rigSetComponent(cctx, ctx.Sess.Userid, guids[0], 0, guids[1], extra,
+	res := srv.rigSetComponent(cctx, ctx.Sess.Userid, guids[0], 0, guids[1], extra,
 		rigSetOpts{ParentType: familyLure, EnforceCategory: true, SplitStack: true})
 	body, err := proto.EncodeValue(srv.buildRigSnapshotFull(cctx, ctx.Sess.Userid), ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSplitSourceRefresh(ctx, res)
 	return body, true
 }
 
@@ -2324,12 +2513,13 @@ func hReelSetComp(ctx *Ctx) ([]byte, bool) {
 		return emptyArgsBody(), true
 	}
 	cctx := ctx.Sess.pushCtx()
-	srv.rigSetComponent(cctx, ctx.Sess.Userid, guids[0], 0, guids[1], 0,
+	res := srv.rigSetComponent(cctx, ctx.Sess.Userid, guids[0], 0, guids[1], 0,
 		rigSetOpts{ParentType: familyReel, EnforceCategory: true, SplitStack: true})
 	body, err := proto.EncodeValue(srv.buildRigSnapshotFull(cctx, ctx.Sess.Userid), ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSplitSourceRefresh(ctx, res)
 	return body, true
 }
 
@@ -2433,11 +2623,12 @@ func hHanditemRemoveComp(ctx *Ctx) ([]byte, bool) {
 		itemGUID = guids[1]
 	}
 	cctx := ctx.Sess.pushCtx()
-	srv.rigRemoveItemComponent(cctx, ctx.Sess.Userid, guids[0], itemGUID)
+	res := srv.rigRemoveItemComponent(cctx, ctx.Sess.Userid, guids[0], itemGUID)
 	body, err := proto.EncodeValue(srv.buildRigSnapshotFull(cctx, ctx.Sess.Userid), ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSourceStackRefresh(ctx, res)
 	return body, true
 }
 
@@ -2452,11 +2643,12 @@ func hHanditemRemoveAll(ctx *Ctx) ([]byte, bool) {
 		return emptyArgsBody(), true
 	}
 	cctx := ctx.Sess.pushCtx()
-	srv.rigRemoveAll(cctx, ctx.Sess.Userid, guids[0])
+	results := srv.rigRemoveAll(cctx, ctx.Sess.Userid, guids[0])
 	body, err := proto.EncodeValue(srv.buildRigSnapshotFull(cctx, ctx.Sess.Userid), ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
+	srv.queueSourceStackRefresh(ctx, results...)
 	return body, true
 }
 
@@ -2476,4 +2668,8 @@ func hexHead(b []byte, n int) string {
 		b = b[:n]
 	}
 	return fmt.Sprintf("%x", b)
+}
+
+func baitSlotCount(rigType int64) int {
+	return max(2, len(slotIndicesFor(rigType, catHook)))
 }

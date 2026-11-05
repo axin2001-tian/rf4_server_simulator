@@ -46,8 +46,20 @@ func (d *DB) AddSkillPoints(ctx context.Context, uid, skillID int64, delta float
 	return err
 }
 
-// ListSkillNodes 取玩家技能节点等级。
+// ListSkillNodes 取玩家技能节点等级，并把共享身份投影到组内全部节点。
 func (d *DB) ListSkillNodes(ctx context.Context, uid int64) (map[int64]int64, error) {
+	out, err := d.listRawSkillNodes(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	ident, err := d.LoadSkillIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ident.Project(out), nil
+}
+
+func (d *DB) listRawSkillNodes(ctx context.Context, uid int64) (map[int64]int64, error) {
 	rows, err := d.SQL.QueryContext(ctx, `SELECT node_id, level FROM skill_node WHERE uid=?`, uid)
 	if err != nil {
 		return nil, err
@@ -234,9 +246,27 @@ func (d *DB) CatchLogTotals(ctx context.Context, uid int64) (total, trophy, supe
 
 // ---- 地点买断 ----
 
-// PlaceAccessList 玩家已买断地点。
+// PlaceAccessList 玩家已买断地点（档案 307 f22）。
 func (d *DB) PlaceAccessList(ctx context.Context, uid int64) ([]string, error) {
 	rows, err := d.SQL.QueryContext(ctx, `SELECT place FROM place_access WHERE uid=? AND kind='buyout'`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// HouseAccessList 玩家已拥有房屋（place 存房屋 item_id，档案 307 f20）。
+func (d *DB) HouseAccessList(ctx context.Context, uid int64) ([]string, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT place FROM place_access WHERE uid=? AND kind='house'`, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +413,30 @@ func (d *DB) GetItemDefByItemID(ctx context.Context, itemID string) (*ItemDef, e
 		return nil, err
 	}
 	return def, nil
+}
+
+// ListItemDefsByCategory 按品类读取全部物品定义。
+// 引线制作需要用普通主线的物理参数匹配对应的前导线定义。
+func (d *DB) ListItemDefsByCategory(ctx context.Context, category int64) ([]*ItemDef, error) {
+	rows, err := d.SQL.QueryContext(ctx, `
+		SELECT numeric_id, COALESCE(item_id,''), COALESCE(category,0), COALESCE(kind,''),
+		       COALESCE(brand,''), COALESCE(attrs_json,'')
+		FROM item_def WHERE category=? ORDER BY numeric_id`, category)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*ItemDef
+	for rows.Next() {
+		def := &ItemDef{}
+		if err := rows.Scan(&def.NumericID, &def.ItemID, &def.Category, &def.Kind,
+			&def.Brand, &def.AttrsJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, def)
+	}
+	return out, rows.Err()
 }
 
 // GetItemByGUID 取单个物品行。
@@ -686,6 +740,7 @@ func (d *DB) UpdateItemContainer(ctx context.Context, guid, container string) er
 }
 
 // NextFreeSlot 取某容器内下一个可用槽位（空容器从 0 开始）。
+// 新建物品默认 slot=0，多件同槽时客户端只会显示一件，批量发放必须逐件分配。
 func (d *DB) NextFreeSlot(ctx context.Context, uid int64, container string) (int64, error) {
 	var next int64
 	err := d.SQL.QueryRowContext(ctx,

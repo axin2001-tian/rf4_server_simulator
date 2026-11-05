@@ -2,6 +2,7 @@ package gameserver
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand"
 	"strings"
@@ -100,6 +101,7 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 	hasFish := pending != nil && hooked
 
 	levelsGained := int64(0)
+	newLevel := int64(1)
 	prevLevel := int64(1)
 	if hasFish {
 		// 14/4 只结算经验；银币由鱼市 20/2 卖鱼入账。
@@ -107,21 +109,10 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		bonusXp := s.tunableF("xp_gain", 1.0)
 		xp = int64(math.Round(float64(xp) * bonusXp))
 		prevBest, _ := s.DB.CatchLogMaxWeight(cctx, uid, pending.Species)
-		oldLevel := int64(1)
-		if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
-			oldLevel = pp.Level
-		}
-		newLevel, _, gained := s.grantXp(cctx, uid, xp)
+		var gained int64
+		newLevel, _, gained = s.grantXp(cctx, uid, xp)
 		levelsGained = gained
 		prevLevel = max64(1, newLevel-1)
-		if gained > 0 {
-			s.grantLevelUps(cctx, ctx, uid, oldLevel, newLevel)
-			pname := ""
-			if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
-				pname = pp.Name
-			}
-			s.pushLevelUp(ctx.Sess, newLevel, pname)
-		}
 		// 按实际钓组大类增长；概率随当前熟练度反比下降，满熟练度不再增加。
 		skillID, skillGain := s.awardFishingProficiency(cctx, uid, rigType)
 		// catch_log 只在 14/5 入护时写入；14/4 放生的鱼不进入统计和纪录。
@@ -140,13 +131,18 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 				ctx.Log.Warn("星级累计失败", "grade", pending.Grade, "err", serr)
 			}
 		}
-		stats813 = s.build813(cctx, uid, pending, prevBest, skillGain)
+		stats813 = s.build813(cctx, uid, pending, prevBest, skillGain, levelsGained)
 		profileTree, _ = s.BuildProfile307(cctx, uid)
 		skill312 = s.buildSingleSkill312(cctx, uid, skillID)
-		// 结算摘要：鱼种/重量/档位/历史最佳，便于核对"模型=结算"和重量标准。
-		ctx.Log.Info("14/4 结算", "species", pending.Species, "weight_g", pending.WeightG,
-			"grade", pending.Grade, "prev_best_g", prevBest, "xp", xp,
-			"statics", s.settleStatics(cctx, pending.Species))
+	}
+
+	if hasFish && levelsGained > 0 {
+		s.grantLevelUps(cctx, ctx, uid, newLevel-levelsGained, newLevel)
+		pname := ""
+		if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
+			pname = pp.Name
+		}
+		s.pushLevelUp(ctx.Sess, newLevel, pname)
 	}
 
 	// 801（空竿也回完整 801，f0/f6/f7 = null）
@@ -194,7 +190,7 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 }
 
 // build813 搏鱼统计块（813 内嵌 310 + 25）。
-func (s *Server) build813(ctx context.Context, uid int64, f *RolledFish, prevBest int64, skillGain float64) *proto.Value {
+func (s *Server) build813(ctx context.Context, uid int64, f *RolledFish, prevBest int64, skillGain float64, levelsGained int64) *proto.Value {
 	// SPECIES_FIGHT_STATICS 鱼种静态组（未知鱼种按 species_weight 推导）
 	st := s.settleStatics(ctx, f.Species)
 	f0, f1, f2, f3, f5 := float64(st[0]), float64(st[1]), float64(st[2]), float64(st[3]), float64(st[5])
@@ -210,11 +206,11 @@ func (s *Server) build813(ctx context.Context, uid int64, f *RolledFish, prevBes
 
 	obj310 := wiregen.MustMakeObj("kegeppimjbm", map[int]*proto.Value{
 		0: proto.U64(uint64(f.XP)), // 单鱼经验（不是累计）
-		1: proto.U32(personalRecordFlag(prevBest <= 0 || f.WeightG > prevBest)),
+		1: proto.U32(uint32(max64(0, levelsGained))),
 		2: proto.U32(uint32(stLastSkill(s, uid))),
 		3: proto.F32(float32(skillGain)),
 		4: proto.Null(),
-		5: proto.U32(0), // levelsGained 由 2/6 承担
+		5: proto.U32(0),
 		6: proto.Args(proto.S("31")),
 	})
 	keep25 := s.buildPending25(f, s.stateFor(uid), s.currentLevel(uid))
@@ -246,27 +242,8 @@ func stLastSkill(s *Server, uid int64) int64 {
 
 // buildSingleSkill312 单大类 312（801.f6 用）。
 func (s *Server) buildSingleSkill312(ctx context.Context, uid, catID int64) *proto.Value {
-	points, _ := s.DB.ListSkills(ctx, uid)
-	nodes, _ := s.DB.ListSkillNodes(ctx, uid)
-	catNodes := proto.Args(proto.S("122"))
-	for _, nd := range s.skillDefsOfCat(catID) {
-		catNodes.Items = append(catNodes.Items,
-			wiregen.MustMakeObj("bmdafhbpfci", map[int]*proto.Value{
-				0: proto.U32(uint32(nd.NodeID)),
-				1: proto.U32(f32bitsOf(nd.UnlockPct)),
-				2: proto.U32(uint32(nd.MaxLevel)),
-				3: proto.U32(uint32(nodes[nd.NodeID])),
-				4: proto.U32(f32bitsOf(nd.EffectPct)),
-				5: proto.U32(uint32(nd.GroupID)),
-				6: proto.U32(boolU32(nodeUnlocked(nd, points[catID], 0))),
-			}))
-	}
-	return wiregen.MustMakeObj("kmepameiibi", map[int]*proto.Value{
-		0: proto.U32(uint32(catID)),
-		1: proto.F32(float32(points[catID])),
-		2: proto.F32(0.0),
-		3: catNodes,
-	})
+	effects, _ := s.effectiveFishingSkills(ctx, uid)
+	return s.skillCategory312(catID, effects)
 }
 
 // build5003 5012 赛季块（801.f3）。
@@ -311,6 +288,8 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 	}
 	cctx := ctx.Sess.pushCtx()
 	st := s.stateFor(uid)
+	st.finishMu.Lock()
+	defer st.finishMu.Unlock()
 
 	st.mu.Lock()
 	pending := st.Pending
@@ -320,6 +299,7 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			ctx.ReplyFailure("System.ArgumentException", "入护的鱼与本次钓获不一致")
 			return nil, true
 		}
+		echo := pending.FishGUID
 		kept := *pending
 		if kept.LocLevel == "" {
 			kept.LocLevel = s.currentLevel(uid)
@@ -331,15 +311,17 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			ctx.ReplyFailure("System.IO.IOException", "护网容量未能读取，请重试")
 			return nil, true
 		}
+		// 落库
 		keptInNet, err := s.DB.KeepFishingCatchWithCapacity(cctx, &store.KeepnetEntry{
-			EchoGUID: kept.FishGUID, UID: uid, Species: kept.Species, NameZh: kept.Name,
+			EchoGUID: echo, UID: uid, Species: kept.Species, NameZh: kept.Name,
 			WeightG: kept.WeightG, LengthM: kept.LengthM, Cat: kept.Grade,
 			KeepLoc: st.Loc, KeepSpot: int64(st.Spot), KeepBait: st.Bait,
 			KeepLevel: keepLevel, TS: float64(time.Now().UnixNano()) / 1e9,
 		}, kept.XP, kept.Silver, capacity)
 		if err != nil {
 			st.mu.Unlock()
-			if err == store.ErrKeepnetFull {
+			ctx.Log.Warn("入护保存失败", "err", err)
+			if errors.Is(err, store.ErrKeepnetFull) {
 				ctx.ReplyFailure("System.InvalidOperationException", "护网已满，请先腾出位置")
 			} else {
 				ctx.ReplyFailure("System.IO.IOException", "入护未能保存，请重试")
@@ -350,10 +332,14 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 		st.CastActive = false
 		st.Hooked = false
 		st.Resolved = true
+		st.persist.recoverCompleted, st.persist.recoverPending = false, false
+		st.cancelBiteTimerLocked()
+		st.cancelPendingTimerLocked()
 		if keptInNet {
 			st.Keepnet = append(st.Keepnet, &kept)
 		}
 		st.mu.Unlock()
+		s.notifyFishKept(ctx.Sess, &kept)
 		out := proto.Args(proto.S("61"))
 		if keptInNet {
 			out.Items = append(out.Items, s.buildPending25(&kept, st, keepLevel))
@@ -373,7 +359,7 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			if level == "" {
 				level = s.currentLevel(uid)
 			}
-			f25 := buildKeepnet25(e, level)
+			f25 := s.keepnetItemTree(cctx, e, level)
 			body, err2 := proto.EncodeValue(build800(proto.Args(proto.S("61"), f25), proto.Null(), proto.Null()), ctx.Sess.Table())
 			if err2 != nil {
 				return nil, false
@@ -389,7 +375,7 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			if level == "" {
 				level = s.currentLevel(uid)
 			}
-			out.Items = append(out.Items, buildKeepnet25(e, level))
+			out.Items = append(out.Items, s.keepnetItemTree(cctx, e, level))
 		}
 	}
 	body, err := proto.EncodeValue(build800(out, proto.Null(), proto.Null()), ctx.Sess.Table())
@@ -406,10 +392,18 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	uid := ctx.Sess.Userid
+	guids := deepGUIDs(ctx.Tree)
 	st := s.stateFor(uid)
+	st.finishMu.Lock()
+	defer st.finishMu.Unlock()
 	st.mu.Lock()
 	pending := st.Pending
-	st.Pending = nil
+	if pending != nil && len(guids) > 0 && !strings.EqualFold(guids[len(guids)-1], pending.FishGUID) {
+		st.mu.Unlock()
+		ctx.ReplyFailure("System.ArgumentException", "放生的鱼与本次钓获不一致")
+		return nil, true
+	}
+	loc := st.Loc
 	st.mu.Unlock()
 
 	if pending != nil {
@@ -422,9 +416,11 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 				fid = pending.FishGUID
 			}
 			if ok, why := canNameFish(cctx, s.DB, pending.Grade, fid); ok {
-				if ok2, why2 := s.insertNamedFish(cctx, uid, pending, fid, name, st.Loc); ok2 {
+				if ok2, why2 := s.insertNamedFish(cctx, uid, pending, fid, name, loc); ok2 {
+					st.mu.Lock()
 					pending.Name = strings.TrimSpace(name)
 					pending.NamedID = fid
+					st.mu.Unlock()
 					ctx.Log.Info("蓝冠命名成功", "鱼种", pending.Species, "重量", pending.WeightG, "名字", pending.Name)
 				} else {
 					ctx.Log.Warn("蓝冠命名被拒", "原因", why2, "鱼种", pending.Species, "名字", name)
@@ -432,10 +428,6 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 			} else {
 				ctx.Log.Warn("蓝冠命名被拒", "原因", why, "鱼种", pending.Species, "名字", name)
 			}
-		}
-		// 被命名鱼又被钓到/放生一次 → 计数 +1（note_recatch；含刚命名的这条）
-		if pending.NamedID != "" {
-			s.DB.NamedFishNoteRecatch(cctx, pending.NamedID)
 		}
 		// 放生奖励：base × release_xp_ratio（默认 0.5）
 		base := pending.XP
@@ -445,24 +437,30 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 		}
 		ratio := s.tunableF("release_xp_ratio", 0.5)
 		bonus := int64(math.Round(float64(base) * ratio))
-		if bonus > 0 {
-			oldLevel2 := int64(1)
-			if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
-				oldLevel2 = pp.Level
-			}
-			newLevel, _, gained := s.grantXp(cctx, uid, bonus)
+		result, replayed, err := s.releaseCatchOnce(cctx, uid, pending.FishGUID, bonus)
+		if err != nil {
+			ctx.Log.Warn("放生保存失败", "err", err)
+			ctx.ReplyFailure("System.IO.IOException", "放生未能保存，请重试")
+			return nil, true
+		}
+		st.mu.Lock()
+		st.Pending = nil
+		st.CastActive = false
+		st.Hooked = false
+		st.Resolved = true
+		st.persist.recoverCompleted, st.persist.recoverPending = false, false
+		st.mu.Unlock()
+		if !replayed && pending.NamedID != "" {
+			s.DB.NamedFishNoteRecatch(cctx, pending.NamedID)
+		}
+		if !replayed && result.Bonus > 0 {
 			ctx.Sess.Push2_9(100, uint64(bonus))
 			ctx.Sess.Push2_1()
-			if gained > 0 {
-				ctx.Sess.Push2_6(max64(1, newLevel-1))
-				s.grantLevelUps(cctx, ctx, uid, oldLevel2, newLevel)
-				pname := ""
-				if pp, perr := s.DB.GetProfile(cctx, uid); perr == nil {
-					pname = pp.Name
-				}
-				s.pushLevelUp(ctx.Sess, newLevel, pname)
+			if result.LevelsGained > 0 {
+				ctx.Sess.Push2_6(max64(1, result.Level-1))
 			}
 		}
+		s.notifyFishReleased(ctx.Sess, pending)
 	}
 	// 响应 807：{null, null, 307, null, null, null}
 	profileTree, err := s.BuildProfile307(ctx.Sess.pushCtx(), uid)

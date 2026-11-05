@@ -29,10 +29,11 @@ type DB struct {
 	StaticPath string
 	static     *staticState
 
-	// avatarColOnce/avatarColOK：profile.avatar 列惰性探测。历史库快照
-	// （如部分测试按旧迁移版本打开）没有该列，GetProfile 需要降级。
-	avatarColOnce sync.Once
-	avatarColOK   bool
+	// avatarColOnce/avatarColOK：profile.avatar 列惰性探测。
+	// 历史库快照可能没有该列，GetProfile 需要降级为空串。
+	avatarColOnce  sync.Once
+	avatarColOK    bool
+	shopSupplement shopSupplement
 }
 
 // HasAvatarColumn 返回 profile 表是否已有 avatar 列（结果缓存）。
@@ -63,6 +64,16 @@ func (d *DB) Migrate() error {
 	// 修改现有表，因此先补齐这些列，避免仓储查询或写入失败。
 	if err := d.ensureLegacyPlayerColumns(); err != nil {
 		return fmt.Errorf("补全玩家表列: %w", err)
+	}
+	// 按文件名识别旧分支，保留同编号的主线迁移。
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations
+		SET version=CASE WHEN name='migrations/00025_bait_consumption.sql' THEN 28 ELSE 30 END,
+		    name=CASE WHEN name='migrations/00025_bait_consumption.sql'
+		      THEN 'migrations/00028_bait_consumption.sql' ELSE 'migrations/00030_cafe_pricing_version.sql' END
+		WHERE name IN ('migrations/00023_cafe_pricing_version.sql','migrations/00025_cafe_pricing_version.sql',
+		               'migrations/00027_cafe_pricing_version.sql','migrations/00029_cafe_pricing_version.sql',
+		               'migrations/00025_bait_consumption.sql')`); err != nil {
+		return fmt.Errorf("兼容旧分支迁移编号: %w", err)
 	}
 	entries, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
@@ -113,11 +124,6 @@ func (d *DB) Migrate() error {
 			return err
 		}
 	}
-	// 迁移后补跑一次：全新库的 profile 表由 00001 创建，发生在前置补列之后，
-	// 需要在这里补上白名单里的新列（幂等）。
-	if err := d.ensureLegacyPlayerColumns(); err != nil {
-		return fmt.Errorf("迁移后补全玩家表列: %w", err)
-	}
 	if d.static != nil {
 		guardCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -146,7 +152,7 @@ func (d *DB) ensureLegacyPlayerColumns() error {
 		{"profile", "email", "TEXT DEFAULT ''"},
 		{"profile", "role", "INTEGER NOT NULL DEFAULT 0"},
 		{"profile", "banned", "INTEGER NOT NULL DEFAULT 0"},
-		{"profile", "avatar", "TEXT DEFAULT ''"},
+		{"profile", "avatar", "TEXT NOT NULL DEFAULT ''"},
 		{"item", "item_id", "TEXT"},
 		{"item", "numeric_id", "INTEGER"},
 		{"item", "wire_class", "TEXT"},

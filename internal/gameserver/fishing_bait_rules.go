@@ -1,9 +1,13 @@
 package gameserver
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -12,9 +16,13 @@ var fishBaitRuleText string
 
 type fishBaitRule struct {
 	allow, deny []string
+	bottomOnly  []string
+	condition   string
 }
 
 var fishBaitRules = parseFishBaitRules(fishBaitRuleText)
+
+const maxBaitPreference = 1.5 * 1.15
 
 func ruleName(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -44,16 +52,20 @@ func parseFishBaitRules(raw string) map[string]fishBaitRule {
 		if !ok {
 			continue
 		}
-		bait, _, ok := strings.Cut(tail, "  前置条件 ")
+		bait, condition, ok := strings.Cut(tail, "  前置条件 ")
 		if !ok {
 			continue
 		}
 		bait = strings.NewReplacer("（", "(", "）", ")").Replace(bait)
 		allowed, extra, _ := strings.Cut(bait, "(")
-		r := fishBaitRule{allow: strings.Split(strings.TrimSpace(allowed), "/")}
+		r := fishBaitRule{allow: strings.Split(strings.TrimSpace(allowed), "/"), condition: strings.TrimSpace(condition)}
 		if _, denied, ok := strings.Cut(extra, "不吃"); ok {
 			denied = strings.FieldsFunc(denied, func(c rune) bool { return c == ')' || c == '；' || c == ';' })[0]
 			r.deny = strings.Split(denied, "/")
+		}
+		if _, only, ok := strings.Cut(extra, "底钓只吃"); ok {
+			only = strings.TrimRight(only, ") \r\t")
+			r.bottomOnly = strings.Split(only, "/")
 		}
 		out[ruleName(name)] = r
 	}
@@ -73,6 +85,7 @@ func (b ruleBait) matches(term string) bool {
 		"dough_sweet": {"甜的面团"},
 		"caddisfly":   {"毛翅目幼虫"},
 		"baitfrog":    {"青蛙"},
+		"fish_flesh":  {"鱼肉块"},
 	}
 	for _, alias := range aliases[b.id] {
 		if t == ruleName(alias) {
@@ -88,7 +101,7 @@ func (b ruleBait) matches(term string) bool {
 	if t == "活饵类" {
 		return b.category == 27 && b.baitType == 4
 	}
-	if t == "饵鱼类" || t == "饵鱼" {
+	if t == "饵鱼类" || t == "饵鱼" || t == "各类饵鱼" {
 		return b.category == 27 && (b.baitType == 4 || b.baitType == 15)
 	}
 	if b.category == 27 {
@@ -137,36 +150,40 @@ func (b ruleBait) matches(term string) bool {
 	return false
 }
 
-// filterFishBaits 只保留有吃饵规则或实钓证据的鱼；明确排除的饵不被证据放行。
+// filterFishBaits 对喜好饵和其他饵分别加权，明确禁饵仍然排除。
 func (s *Server) filterFishBaits(loc, bait string, keys []string, weights []float64) ([]string, []float64) {
-	if bait == "" {
-		return nil, nil
-	}
-	ctx := s.dbCtx()
-	b := ruleBait{id: bait}
+	return s.filterFishBaitSet(loc, []string{bait}, keys, weights, time.Now())
+}
+
+func (s *Server) loadRuleBait(ctx context.Context, id string) (ruleBait, bool) {
+	b := ruleBait{id: id}
 	var raw string
 	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COALESCE(c.name_zh,c.name,''),d.category,COALESCE(d.attrs_json,'{}')
-		FROM item_def d LEFT JOIN item_catalog c ON c.item_id=d.item_id WHERE d.item_id=?`, bait).Scan(&b.name, &b.category, &raw); err != nil {
-		return nil, nil
+   FROM item_def d LEFT JOIN item_catalog c ON c.item_id=d.item_id WHERE d.item_id=?`, id).Scan(&b.name, &b.category, &raw); err != nil {
+		return ruleBait{}, false
 	}
 	if b.category != 17 && b.category != 27 {
-		return nil, nil
+		return ruleBait{}, false
 	}
 	var attrs struct {
 		LureType int64 `json:"mbemakijdeh"`
 		BaitType int64 `json:"fopbhlmkcpe"`
 	}
 	if json.Unmarshal([]byte(raw), &attrs) != nil {
-		return nil, nil
+		return ruleBait{}, false
 	}
 	b.lureType, b.baitType = attrs.LureType, attrs.BaitType
+	return b, true
+}
+
+func (s *Server) loadFishNames(ctx context.Context) (map[string]string, bool) {
 	names := map[string]string{}
-	// 后台可向水域添加鱼种，名称也须从其他水域解析，避免遗漏该鱼的禁饵。
 	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT fish_key,fish_zh FROM loc_wiki_fish
 		UNION SELECT fish_key,name_zh FROM loc_fish`)
 	if err != nil {
-		return nil, nil
+		return names, false
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var key, name string
 		if rows.Scan(&key, &name) == nil {
@@ -175,53 +192,185 @@ func (s *Server) filterFishBaits(loc, bait string, keys []string, weights []floa
 			}
 		}
 	}
-	err = rows.Err()
-	rows.Close()
+	return names, true
+}
+
+func (s *Server) loadLocalBaitEvidence(ctx context.Context, loc, baitID, baitName string) map[string]bool {
+	evidence := map[string]bool{}
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT fish_key FROM loc_bait_fish WHERE loc=? AND bait IN (?,?) AND catches>0`, loc, baitID, baitName)
 	if err != nil {
+		return evidence
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if rows.Scan(&key) == nil {
+			evidence[key] = true
+		}
+	}
+	return evidence
+}
+
+func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weights []float64, now time.Time, contexts ...fishRollContext) ([]string, []float64) {
+	if s.DB == nil {
 		return nil, nil
 	}
-	evidence := s.DB.BaitTiers(ctx, bait)
-	localEvidence := map[string]bool{}
-	rows, err = s.DB.SQL.QueryContext(ctx, `SELECT fish_key FROM loc_bait_fish WHERE loc=? AND bait IN (?,?) AND catches>0`, loc, bait, b.name)
-	if err == nil {
-		for rows.Next() {
-			var key string
-			if rows.Scan(&key) == nil {
-				localEvidence[key] = true
-			}
+	c := rollContext(contexts)
+	ctx := s.dbCtx()
+	var baits []ruleBait
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
 		}
-		if rows.Err() != nil {
-			localEvidence = map[string]bool{}
+		seen[id] = true
+		b, ok := s.cachedBaitDefinition(ctx, c, id)
+		if !ok {
+			return nil, nil
 		}
-		rows.Close()
+		baits = append(baits, b)
+	}
+	if len(baits) == 0 {
+		return nil, nil
+	}
+	names, namesOK := s.cachedFishNames(ctx, c)
+	if !namesOK {
+		return nil, nil
+	}
+	evidence := make([]map[string]int64, len(baits))
+	localEvidence := make([]map[string]bool, len(baits))
+	for i, b := range baits {
+		evidence[i] = s.cachedBaitTiers(ctx, c, b.id)
+		localEvidence[i] = s.cachedLocalBaitEvidence(ctx, c, loc, b.id, b.name)
 	}
 	outKeys := make([]string, 0, len(keys))
 	outWeights := make([]float64, 0, len(keys))
+	period := (now.Unix() - worldDayEpochUnix) / (4 * realSecPerGameHour)
 	for i, key := range keys {
 		if weights[i] <= 0 {
 			continue
 		}
 		r := fishBaitRules[ruleName(names[key])]
-		denied, allowed := false, false
-		for _, term := range r.deny {
-			if b.matches(term) {
+		denied := false
+		best := 0.0
+		preferred := 0
+		for j, b := range baits {
+			if bottomRigTypes[c.rigType] && len(r.bottomOnly) > 0 && !b.matchesAny(r.bottomOnly) {
 				denied = true
 				break
 			}
-		}
-		if denied {
-			continue
-		}
-		for _, term := range r.allow {
-			if b.matches(term) {
-				allowed = true
+			for _, term := range r.deny {
+				if b.matches(term) {
+					denied = true
+					break
+				}
+			}
+			if denied {
 				break
 			}
+			allowed := false
+			for _, term := range r.allow {
+				if b.matches(term) {
+					allowed = true
+					break
+				}
+			}
+			score := 0.0
+			variation := fishVariation(fmt.Sprintf("%s/%s/%s/%d", loc, key, b.id, period))
+			if allowed || evidence[j][key] > 0 || localEvidence[j][key] {
+				preferred++
+				score = 1.0 + 0.5*variation
+			} else if b.legalAlternative(r) {
+				score = maxBaitPreference * 0.05
+			}
+			best = math.Max(best, score)
 		}
-		if allowed || evidence[key] > 0 || localEvidence[key] {
-			outKeys = append(outKeys, key)
-			outWeights = append(outWeights, weights[i])
+		if denied || best <= 0 {
+			continue
 		}
+		if preferred > 1 {
+			best *= 1.15
+		}
+		outKeys = append(outKeys, key)
+		outWeights = append(outWeights, weights[i]*best)
 	}
 	return outKeys, outWeights
+}
+
+func (b ruleBait) matchesAny(terms []string) bool {
+	for _, term := range terms {
+		if b.matches(term) {
+			return true
+		}
+	}
+	return false
+}
+
+// 非偏好只在已识别食性族内保留杂口，不把所有天然饵视为通用食物。
+func (b ruleBait) legalAlternative(r fishBaitRule) bool {
+	if b.category != 27 {
+		return false
+	}
+	var diet string
+	switch b.baitType {
+	case 2, 6, 7:
+		diet = "虫"
+	case 8:
+		diet = "煮饵"
+	case 9:
+		diet = "颗粒"
+	case 10:
+		diet = "玉米"
+	case 11, 13:
+		diet = "植物"
+	case 4, 15:
+		diet = "饵鱼"
+	case 14:
+		diet = "鱼肉"
+	}
+	if b.id == "fish_flesh" {
+		diet = "鱼肉"
+	}
+	terms := strings.Join(r.allow, "/")
+	switch diet {
+	case "虫":
+		for _, term := range []string{"蠕虫", "蚯蚓", "红虫", "苍蝇", "蛆虫", "毛翅", "树皮甲虫", "昆虫", "地龙", "土蚕", "水蛭", "蜉蝣", "襀翅", "牛虻", "草蜢", "蟋蟀", "蜣螂", "金龟", "龙虱", "蝼蛄"} {
+			if strings.Contains(terms, term) {
+				return true
+			}
+		}
+	case "植物":
+		for _, term := range []string{"面包", "面团", "粥", "玉米", "豌豆", "坚果", "奶酪", "水果", "蜂蜜", "奶油", "椰子", "中立", "自然风味"} {
+			if strings.Contains(terms, term) {
+				return true
+			}
+		}
+	case "煮饵":
+		return strings.Contains(terms, "煮饵") || strings.Contains(terms, "煮成饵") || strings.Contains(strings.ToLower(terms), "boilie") || strings.Contains(strings.ToLower(terms), "popup") || strings.Contains(strings.ToLower(terms), "pop up")
+	case "颗粒":
+		return strings.Contains(terms, "颗粒") || strings.Contains(strings.ToLower(terms), "pellet")
+	case "玉米":
+		return strings.Contains(terms, "玉米")
+	case "饵鱼":
+		return strings.Contains(terms, "饵鱼") || strings.Contains(terms, "活饵")
+	case "鱼肉":
+		return strings.Contains(terms, "鱼肉") || strings.Contains(terms, "鱼片")
+	}
+	return false
+}
+
+// 技能只提高已有的正兴趣，不能放行禁饵或不适用的拟饵。
+func fishingBaitInterest(interest float64, bonus fishingSkillBonus) float64 {
+	if interest <= 0 {
+		return 0
+	}
+	multiplier := 1.0
+	if bonus.BiteSpeed > 0 && !math.IsNaN(bonus.BiteSpeed) && !math.IsInf(bonus.BiteSpeed, 0) {
+		multiplier = clampFloat(1/bonus.BiteSpeed, 1, 2)
+	}
+	limit := 1.0
+	if interest <= .1 {
+		limit = .1
+	}
+	return math.Min(limit, interest*multiplier)
 }

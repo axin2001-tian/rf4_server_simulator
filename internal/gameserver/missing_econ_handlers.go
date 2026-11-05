@@ -60,6 +60,9 @@ func hWorkshopRedeem(ctx *Ctx) ([]byte, bool) {
 }
 
 // hStoreBoats 处理 22/5 船只商店；返回 args(149) 中的船只条目，f1/f3 保持数据表位型。
+// 注意：已拥有的房屋也要返回——实测（2026-11-05）该列表是客户端渲染房屋
+// 卡片（购买/检查/进入）的唯一数据源，过滤已拥有条目会让客户端在点击
+// 已购房屋时因找不到数据而停留在“正在下载”。
 func hStoreBoats(ctx *Ctx) ([]byte, bool) {
 	out := proto.Args(proto.S("149"))
 	for _, row := range loadShopBoats() {

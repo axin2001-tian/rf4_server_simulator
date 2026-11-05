@@ -18,6 +18,14 @@ import (
 //go:embed assets/shop_kind_defs.json
 var embeddedShopKindDefs []byte
 
+// shop_houses.json 保存房产商店（housestore_*）的实抓货架。kind 7 没有真实
+// 见证记录，目录模板误用了 farmstore 的农场货架，客户端打开买房界面拉取
+// 22/1 时看不到房子商品，无法发起购买。房价与 22/5 面板（gameserver 侧
+// shop_boats.json）保持一致，避免展示价与结算价不一致。
+//
+//go:embed assets/shop_houses.json
+var embeddedShopHouses []byte
+
 type shopCatalogSKU struct {
 	ItemID string `json:"item_id"`
 	Silver int64  `json:"silver"`
@@ -37,10 +45,21 @@ type shopKindCatalog struct {
 	Sources map[string]string              `json:"sources"`
 }
 
+type shopHouseRow struct {
+	StoreID string `json:"store_id"`
+	ItemID  string `json:"item_id"`
+	Silver  int64  `json:"silver"`
+	Gold    int64  `json:"gold"`
+}
+
 var (
 	shopCatalogOnce sync.Once
 	shopCatalogData *shopKindCatalog
 	shopCatalogErr  error
+
+	shopHousesOnce sync.Once
+	shopHouseErr   error
+	shopHouseShelf map[string][]*ShopPrice
 )
 
 func embeddedShopKindCatalog() (*shopKindCatalog, error) {
@@ -59,6 +78,32 @@ func embeddedShopKindCatalog() (*shopKindCatalog, error) {
 	return shopCatalogData, shopCatalogErr
 }
 
+// embeddedShopHouseShelf 返回房产商店货架（store_id → 单行房子商品）。
+func embeddedShopHouseShelf() (map[string][]*ShopPrice, error) {
+	shopHousesOnce.Do(func() {
+		var payload struct {
+			Rows []shopHouseRow `json:"rows"`
+		}
+		if err := json.Unmarshal(embeddedShopHouses, &payload); err != nil {
+			shopHouseErr = fmt.Errorf("解析内嵌房产货架: %w", err)
+			return
+		}
+		shopHouseShelf = make(map[string][]*ShopPrice, len(payload.Rows))
+		for _, row := range payload.Rows {
+			if row.StoreID == "" || row.ItemID == "" {
+				continue
+			}
+			shopHouseShelf[row.StoreID] = append(shopHouseShelf[row.StoreID], &ShopPrice{
+				ItemID: row.ItemID,
+				Silver: row.Silver,
+				Gold:   row.Gold,
+				Stock:  9999,
+			})
+		}
+	})
+	return shopHouseShelf, shopHouseErr
+}
+
 type shopOverrideValue struct {
 	Silver sql.NullInt64
 	Gold   sql.NullInt64
@@ -71,6 +116,7 @@ const (
 	shopShelfSourceKind     = "kind_template"
 	shopShelfSourceMissing  = "missing_evidence"
 	shopShelfSourceUnknown  = "unknown_store"
+	shopShelfSourceHouse    = "house_store"
 )
 
 type shopShelfResolution struct {
@@ -248,6 +294,10 @@ func applyShopOverrides(base []*ShopPrice, overrides map[string]shopOverrideValu
 				v.Stock = override.Stock.Int64
 			}
 		}
+		// 本地商店持续供货，零库存自动补回基础批量。
+		if v.Stock <= 0 {
+			v.Stock = 1000
+		}
 		out = append(out, &v)
 	}
 	return out
@@ -259,11 +309,40 @@ func (d *DB) effectiveShopShelf(ctx context.Context, storeID string) (*shopShelf
 	if err != nil {
 		return nil, err
 	}
+	// 房产商店走实抓货架：kind 7 模板是误用的农场货架，补齐逻辑还会把
+	// 同类目的其他房子估价塞进来，都不该出现在买房界面。
+	houses, houseErr := embeddedShopHouseShelf()
+	if houseErr != nil {
+		return nil, houseErr
+	}
+	if rows, ok := houses[storeID]; ok {
+		base := copyShopPrices(rows)
+		var overrides map[string]shopOverrideValue
+		if len(base) > 0 {
+			overrides, err = d.loadShopOverrides(ctx, storeID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		def := catalog.Stores[storeID]
+		return &shopShelfResolution{
+			Base:         base,
+			Effective:    applyShopOverrides(base, overrides),
+			Overrides:    overrides,
+			Definition:   def,
+			CatalogKnown: true,
+			Source:       shopShelfSourceHouse,
+		}, nil
+	}
 	recorded, err := d.loadRecordedShopShelves(ctx)
 	if err != nil {
 		return nil, err
 	}
 	base, source, def, known := resolveShopBase(storeID, catalog, recorded)
+	base, _, err = d.augmentShopShelf(ctx, def, base)
+	if err != nil {
+		return nil, err
+	}
 	overrides := map[string]shopOverrideValue{}
 	if len(base) > 0 {
 		overrides, err = d.loadShopOverrides(ctx, storeID)

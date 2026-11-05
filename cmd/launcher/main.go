@@ -56,6 +56,13 @@ type app struct {
 
 	gameMu    sync.RWMutex
 	startGame func(*exec.Cmd) error
+
+	// 托盘状态：systray 在 Run 之前内部句柄为 nil，提前调用 SetIcon/
+	// SetTooltip 会 panic。这里先记录期望状态，托盘就绪后再应用。
+	trayMu    sync.Mutex
+	trayReady bool
+	trayColor int
+	trayTip   string
 }
 
 type logger interface {
@@ -101,7 +108,10 @@ func main() {
 		_ = os.Setenv("RF4_SQLITE_STATIC_PATH", *staticDB)
 	}
 	appCtx, appCancel := context.WithCancel(context.Background())
-	app := &app{cfg: cfg, cfgPath: *configPath, log: panelLogger{}, ctx: appCtx, cancel: appCancel}
+	app := &app{
+		cfg: cfg, cfgPath: *configPath, log: panelLogger{}, ctx: appCtx, cancel: appCancel,
+		trayColor: 3, trayTip: "fish-localserver 本地服务器", // 3=灰（初始化中）
+	}
 	defer app.closeAdmin()
 
 	// ---- Web 控制面板（先于首跑 seed 起来：GUI 无控制台，seed 可能耗时
@@ -124,6 +134,7 @@ func main() {
 	mux.HandleFunc("/api/restart", app.actionHandler("restart"))
 	mux.HandleFunc("/api/game/config", app.handleGameConfig)
 	mux.HandleFunc("/api/game/launch", app.handleGameLaunch)
+	mux.HandleFunc("/api/hosts", app.handleHosts)
 	mux.HandleFunc("/api/open-admin", func(w http.ResponseWriter, r *http.Request) {
 		openBrowser(app.panelURL + "#admin")
 		_ = r
@@ -163,18 +174,49 @@ func main() {
 	// ---- 监督器 ----
 	binDir := filepath.Dir(mustExePath())
 	app.sup = supervisor.New(binDir, *configPath, "logs")
-	app.sup.SetStateCallback(func() { updateTrayIcon(app) })
+	// 状态回调可能在托盘初始化之前（甚至并发）触发，必须自吞异常，
+	// 否则一次托盘调用失败就会带走整个 launcher 及其子进程管理。
+	app.sup.SetStateCallback(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				app.log.Error(fmt.Sprintf("托盘状态刷新异常: %v", r))
+			}
+		}()
+		updateTrayIcon(app)
+	})
+
+	// 上次异常退出可能遗留 launcher 管理的 hosts 行；先按归属状态恢复官方解析。
+	if err := hostsRestore(hostsFilePath()); err != nil {
+		app.log.Warn("清理上次 hosts 遗留状态失败: " + err.Error())
+	}
 
 	// ---- 按序拉起游戏服务 ----
 	go func() {
 		if err := app.sup.StartAll(); err != nil {
 			app.log.Error("进程启动失败: " + err.Error())
+			return
+		}
+		if app.cfg.Launcher.HostsSwitch {
+			if err := hostsSetLocal(hostsFilePath(), loginDomains(app.cfg)); err != nil {
+				app.log.Warn("hosts 自动切换失败（请以管理员身份运行 launcher）: " + err.Error() +
+					"；可手动将 api.rf4game.ru/com 指向 127.0.0.1，或以管理员 PowerShell 运行 tools/hosts.ps1 local")
+			} else {
+				app.log.Info("hosts 已指向本地服，launcher 退出时自动还原")
+			}
 		}
 	}()
 
 	// ---- 托盘常驻 ----
 	systray.Run(app.onTrayReady, func() {
 		app.sup.StopAll()
+		if app.cfg.Launcher.HostsSwitch {
+			if err := hostsRestore(hostsFilePath()); err != nil {
+				app.log.Error("hosts 还原失败: " + err.Error() +
+					"；hosts 仍指向本地服，如需回官服请手动删除 hosts 中的 rf4s-local 行，或以管理员 PowerShell 运行 tools/hosts.ps1 official")
+			} else {
+				app.log.Info("hosts 已还原为官方解析")
+			}
+		}
 	})
 }
 
@@ -236,7 +278,11 @@ func (a *app) onTrayReady() {
 		}
 	}()
 
-	updateTrayIcon(a)
+	// 托盘句柄此时才可用：标记就绪并补应用初始化期间记录的状态。
+	a.trayMu.Lock()
+	a.trayReady = true
+	applyTrayLocked(a.trayColor, a.trayTip)
+	a.trayMu.Unlock()
 }
 
 // updateTrayIcon 按运行中进程数切换托盘颜色（绿=全部 / 黄=部分 / 红=无）。
@@ -255,15 +301,30 @@ func updateTrayIcon(a *app) {
 	a.adminMu.RUnlock()
 	switch {
 	case running == 2 && adminReady:
-		systray.SetIcon(iconColor(0)) // 绿
-		systray.SetTooltip("fish-localserver：全部就绪")
+		a.setTray(0, "fish-localserver：全部就绪") // 绿
 	case running > 0 || adminReady:
-		systray.SetIcon(iconColor(1)) // 黄
-		systray.SetTooltip(fmt.Sprintf("fish-localserver：%d/2 游戏服务，管理后台=%v", running, adminReady))
+		a.setTray(1, fmt.Sprintf("fish-localserver：%d/2 游戏服务，管理后台=%v", running, adminReady)) // 黄
 	default:
-		systray.SetIcon(iconColor(2)) // 红
-		systray.SetTooltip("fish-localserver：已停止")
+		a.setTray(2, "fish-localserver：已停止") // 红
 	}
+}
+
+// setTray 记录并应用托盘图标/提示。systray 未就绪时只记录状态，
+// 避免在 systray.Run 初始化前访问 nil 的 Win32 托盘句柄导致 panic。
+func (a *app) setTray(color int, tip string) {
+	a.trayMu.Lock()
+	defer a.trayMu.Unlock()
+	a.trayColor, a.trayTip = color, tip
+	if !a.trayReady {
+		return
+	}
+	applyTrayLocked(color, tip)
+}
+
+// applyTrayLocked 实际写入托盘（调用方须持有 trayMu）。
+func applyTrayLocked(color int, tip string) {
+	systray.SetIcon(iconColor(color))
+	systray.SetTooltip(tip)
 }
 
 // ---- Web 面板 API ----
@@ -289,7 +350,38 @@ func (a *app) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"admin_error": adminErr,
 		"game_path":   gamePath,
 		"game_region": gameRegion,
+		"hosts":       hostsMode(hostsFilePath()),
 	})
+}
+
+// handleHosts 面板 hosts 指向开关：GET 返回当前指向，POST ?mode=local|official 切换。
+func (a *app) handleHosts(w http.ResponseWriter, r *http.Request) {
+	path := hostsFilePath()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"mode": hostsMode(path)})
+	case http.MethodPost:
+		mode := r.URL.Query().Get("mode")
+		var err error
+		switch mode {
+		case "local":
+			err = hostsSetLocal(path, loginDomains(a.cfg))
+		case "official":
+			err = hostsRestore(path)
+		default:
+			httpError(w, "mode 必须是 local 或 official")
+			return
+		}
+		if err != nil {
+			httpError(w, "hosts 写入失败（请以管理员身份运行 launcher）: "+err.Error()+
+				"；可手动将 api.rf4game.ru/com 指向 127.0.0.1，或以管理员 PowerShell 运行 tools/hosts.ps1 local")
+			return
+		}
+		a.log.Info("hosts 指向已切换为 " + map[string]string{"local": "本地服务器", "official": "官方服务器"}[mode])
+		w.WriteHeader(204)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 func (a *app) handleLogs(w http.ResponseWriter, r *http.Request) {

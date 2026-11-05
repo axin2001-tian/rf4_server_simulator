@@ -6,7 +6,6 @@ package gameserver
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"rf4server/internal/config"
@@ -18,17 +17,9 @@ import (
 // newDetachTestServer 创建使用独立数据库的测试服务器。
 func newDetachTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "rigdetach.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	db := openItemTestDB(t)
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "detach"}}, logging.Discard(), nil)
 	srv.SetDB(db)
-	importStaticForProbe(t, db)
 	return srv, db
 }
 
@@ -123,6 +114,11 @@ func TestDetachReturnsToBackpack(t *testing.T) {
 	rod, err := srv.CreateItem(ctx, uid, "feeder_10125_FD360", "backpack", 1) // Feeder 竿（竿型 10）
 	if err != nil {
 		t.Fatalf("造竿失败: %v", err)
+	}
+	// 钉在路亚族 SimpleJig：本用例验证计件拆分子实例的拆卸回退，
+	// 不在整包门卫家族内才能拆出子实例。
+	if !srv.rigSetType(ctx, uid, rod.GUID, 6) {
+		t.Fatal("rigSetType 失败")
 	}
 	reel, err := srv.CreateItem(ctx, uid, "bclp_5004", "backpack", 1) // 渔轮（品类 6）
 	if err != nil {
@@ -270,6 +266,10 @@ func TestRig157Completeness(t *testing.T) {
 	rod, err := srv.CreateItem(ctx, uid, "feeder_10126_FD390", "backpack", 1) // FD390（Feeder，竿型 10）
 	if err != nil {
 		t.Fatalf("造 FD390 失败: %v", err)
+	}
+	// 同 TestDetachReturnsToBackpack：钉路亚族保持计件拆分子实例路径。
+	if !srv.rigSetType(ctx, uid, rod.GUID, 6) {
+		t.Fatal("rigSetType 失败")
 	}
 	reel, err := srv.CreateItem(ctx, uid, "spin_5184", "backpack", 1) // 渔轮
 	if err != nil {

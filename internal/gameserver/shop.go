@@ -2,7 +2,9 @@ package gameserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"rf4server/internal/proto"
 	"rf4server/internal/store"
@@ -33,6 +35,8 @@ func hStoreList(ctx *Ctx) ([]byte, bool) {
 		ctx.Log.Warn("读取商店货架失败", "store", storeID, "err", err)
 		items = nil
 	}
+	// 房产货架行必须保留：实测缺失时客户端点击房屋直接转圈（房屋 UI 的
+	// 必要数据源），所有权改由档案 f20/f22 携带（见 profilebuild.go）。
 	for _, p := range items {
 		out.Items = append(out.Items, wiregen.MustMakeObj("ifdefblccde", map[int]*proto.Value{
 			0: proto.StrVal(p.ItemID),
@@ -127,11 +131,15 @@ func hStoreBuy(goldCol bool) Handler {
 		if !srv.requireDB(ctx) {
 			return nil, false
 		}
+		fail := func(message string) ([]byte, bool) {
+			ctx.ReplyFailure("System.InvalidOperationException", message)
+			return nil, true
+		}
 		uid := ctx.Sess.Userid
 		strs := treeStrs(ctx.Tree)
 		ints := treeInts(ctx.Tree)
 		if len(strs) < 2 {
-			return []byte{0x0F}, true // Bool false
+			return fail("购买参数无效")
 		}
 		storeID, itemID := strs[0], strs[1]
 		var offer uint64
@@ -142,18 +150,18 @@ func hStoreBuy(goldCol bool) Handler {
 		price, err := srv.storePrice(cctx, storeID, itemID, offer, goldCol)
 		if err != nil {
 			ctx.Log.Warn("商店拒绝购买", "store", storeID, "item", itemID, "gold", goldCol, "err", err)
-			return []byte{0x0F}, true
+			return fail("购买未完成，请刷新商店后重试")
 		}
 		prepared, isBundle, err := srv.prepareStoreGoods(cctx, uid, itemID)
 		if err != nil {
 			ctx.Log.Warn("商店商品不可构造", "item", itemID, "err", err)
-			return []byte{0x0F}, true
+			return fail("购买未完成，请刷新商店后重试")
 		}
 
 		tx, err := beginEconomyTx(cctx, srv.DB)
 		if err != nil {
 			ctx.Log.Warn("商店开启事务失败", "err", err)
-			return []byte{0x0F}, true
+			return fail("购买未完成，请刷新商店后重试")
 		}
 		defer func() { _ = tx.Rollback() }()
 
@@ -167,7 +175,10 @@ func hStoreBuy(goldCol bool) Handler {
 		if err := applyWalletTx(cctx, tx, uid, silverDelta, goldDelta,
 			"buy", itemID, "", note); err != nil {
 			ctx.Log.Warn("商店扣款失败", "item", itemID, "err", err)
-			return []byte{0x0F}, true
+			if errors.Is(err, errInsufficientFunds) {
+				return fail("余额不足，未购买商品")
+			}
+			return fail("购买未完成，请刷新商店后重试")
 		}
 
 		granted := make([]*store.Item, 0, len(prepared))
@@ -175,16 +186,16 @@ func hStoreBuy(goldCol bool) Handler {
 			row, _, gerr := grantPreparedItemTx(cctx, tx, it, true)
 			if gerr != nil {
 				ctx.Log.Warn("商店入库失败", "item", it.ItemID, "err", gerr)
-				return []byte{0x0F}, true
+				return fail("购买未完成，请刷新商店后重试")
 			}
 			granted = append(granted, row)
 		}
 		// 纸质地图（category 40）只是可阅读的地图道具，购买它不等于买断地点：
-		// 之前这里会写入 place_access(kind='buyout')，导致"买张地图就变成无限访问"。
-		// 地点买断只走 3/37（金币买断）这一条路，这里不再授予任何访问权。
+		// 旧实现会在这里写 place_access(kind='buyout')，导致"买张地图就变成无限访问"。
+		// 地点访问只走 3/37 金币买断这一条路，商店购买不再授予任何访问权。
 		if err := tx.Commit(); err != nil {
 			ctx.Log.Warn("商店事务提交失败", "item", itemID, "err", err)
-			return []byte{0x0F}, true
+			return fail("购买未完成，请刷新商店后重试")
 		}
 
 		trees := make([]*proto.Value, 0, len(granted))
@@ -269,11 +280,15 @@ func hStoreReturn(ctx *Ctx) ([]byte, bool) {
 	return body, true
 }
 
-// hStoreATMQuery 处理 22/6：买房子界面点一套房时客户端会发它请求房屋详情，
-// 之前固定回 0x0F（客户端不识别的布尔值），界面就一直停在"正在下载"。
-// 先回通用 null，让客户端按"没有详情"处理；真正的房屋对象结构待补。
+// hStoreATMQuery 处理 22/6。实抓证据（2026-11-04 trace）：客户端在房产
+// 购买流程中每次 3/33 之后都会发送 [store_id, filetime]，据此判断支付/
+// 结算是否完成；回 false 会让客户端停在购买界面循环。房产商店回 true
+// 放行结算；其余商店维持既有 false 行为，不影响 ATM 钱包商店。
 func hStoreATMQuery(ctx *Ctx) ([]byte, bool) {
-	return []byte{0x00}, true
+	if strs := treeStrs(ctx.Tree); len(strs) > 0 && strings.HasPrefix(strs[0], "housestore_") {
+		return []byte{0x0E}, true
+	}
+	return []byte{0x0F}, true
 }
 
 // treeStrs、treeInts 分别读取顶层 args 中的字符串和整数序列。
@@ -307,6 +322,9 @@ func registerShopHandlers(d *Dispatch) {
 	d.Register(22, 1, hStoreList)
 	d.Register(22, 2, hStoreBuy(false))
 	d.Register(22, 3, hStoreBuy(true))
+	for _, sub := range []uint8{2, 3} {
+		d.RegisterResponseContract(22, sub, ResponseContractRule{Kind: proto.KindObj, TypeIDs: []uint32{804}, Classes: []string{"jfafgmcfjkc"}})
+	}
 	d.Register(22, 4, hStoreReturn)
 	d.Register(22, 6, hStoreATMQuery)
 }
