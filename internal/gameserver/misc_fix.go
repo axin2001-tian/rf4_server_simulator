@@ -631,11 +631,12 @@ func fishTVKvShape(shape int64, fishKey string, weightG int64) *proto.Value {
 			4: proto.U32(uint32(w)),
 		})
 	case 30:
-		// 官方 KV 数组，附加榜单类型键 6。
+		// 官方 KV 数组：直接返回生产 fishTVKv（typed 数组 "135" + 对象头
+		// 元素）。旧实现把 Items 重包成 KindKVList，编码器会落到硬编码的
+		// dejdolfnooh 类型名，字节与生产不一致，面板 kv_shape=30 的探测
+		// 结果就代表不了线上行为（PR review 指出）。
 		w, _ := strconv.ParseInt(v2, 10, 64)
-		list := fishTVKv(v1, w)
-		return &proto.Value{Kind: proto.KindKVList, Items: append(list.Items,
-			&proto.Value{Kind: proto.KindKVEntry, Marker: 6, Items: []*proto.Value{proto.StrVal(v6)}})}
+		return fishTVKv(v1, w)
 	case 60, 61:
 		// 元素不带对象头（[键][值]），对应客户端 plbmkhnmeim 的读法。
 		// 60：键 2 用 int marker 0x0D；61：键 2 用 0x13。
