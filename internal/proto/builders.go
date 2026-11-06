@@ -144,6 +144,16 @@ func KVListCustom(typeName string, entries ...KVEntry) *Value {
 	return &Value{Kind: KindTypedArr, TypeName: typeName, Items: items}
 }
 
+// KVListRaw 构造 401.f4 类型化数组，元素不带对象头（与客户端
+// dejdolfnooh 元素读取器一致）。容器仍是 [0x03][类型名][u16 count]。
+func KVListRaw(typeName string, entries ...KVEntry) *Value {
+	items := make([]*Value, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, &Value{Kind: KindKVEntryRaw, Marker: e.Key, Items: []*Value{e.Val}})
+	}
+	return &Value{Kind: KindTypedArr, TypeName: typeName, Items: items}
+}
+
 func ElemNull() *Value { return &Value{Kind: KindElemNull} }
 
 // ---- 字段级构造 ----

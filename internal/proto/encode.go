@@ -15,6 +15,10 @@ func EncodeValue(v *Value, table *OpsTable) ([]byte, error) {
 		return []byte{0x00}, nil
 	}
 	switch v.Kind {
+	case KindRaw:
+		// 探测直通：Hex 原样输出，不做任何包装。
+		return hexDecode(v.Hex)
+
 	case KindNull:
 		return []byte{0x00}, nil
 
@@ -256,6 +260,22 @@ func EncodeValue(v *Value, table *OpsTable) ([]byte, error) {
 		out := make([]byte, 0, 7+len(val))
 		out = append(out, 0x01)
 		out = append(out, PackU32(kvEntryTypeID)...)
+		out = append(out, v.Marker)
+		return append(out, val...), nil
+
+	case KindKVEntryRaw:
+		// 类型化数组元素：[键字节][值 marker+载荷]，无对象头。
+		var val []byte
+		var err error
+		if len(v.Items) > 0 {
+			val, err = EncodeValue(v.Items[0], table)
+		} else {
+			val = []byte{0x00}
+		}
+		if err != nil {
+			return nil, err
+		}
+		out := make([]byte, 0, 1+len(val))
 		out = append(out, v.Marker)
 		return append(out, val...), nil
 

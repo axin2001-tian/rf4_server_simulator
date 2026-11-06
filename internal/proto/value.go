@@ -30,12 +30,18 @@ const (
 	KindKVArr       Kind = "kvarr"   // 裸类型化数组：[u16 n] + n×([键][值 marker+载荷])（401.f4 候选形状）
 	KindTypedArr    Kind = "typedarr" // 自定义类型名数组：[0x03][类型名][u16 n] + 元素（探测用）
 	KindKVEntry     Kind = "kventry" // KV 元素：[01][u32 typeid 400][键字节][值 marker+载荷]
+	// KindKVEntryRaw 类型化数组元素：[键字节][值 marker+载荷]。
+	// 与客户端 plbmkhnmeim（dejdolfnooh 元素读取器）一致：它直接读键字节再读
+	// 多态值，没有对象头。套上 0x01/typeid 会让客户端把 0x01 当键、400 当值的
+	// marker，整条流错位后抛异常，把客户端踢回登录（2026-11-05 两次实测）。
+	KindKVEntryRaw  Kind = "kventryraw"
 	KindDateTime    Kind = "datetime"
 	KindGuid        Kind = "guid"
 	KindU32         Kind = "u32"
 	KindU64         Kind = "u64"
 	KindBool        Kind = "bool"
 	KindStr         Kind = "str"
+	KindRaw         Kind = "raw" // 原始字节直通（探测用）：Hex 字段原样输出
 	KindElemNull    Kind = "elem_null"
 )
 

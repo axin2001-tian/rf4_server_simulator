@@ -93,11 +93,20 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("GET /api/audit", auth(s.handleAudit))
 
 	if webFS != nil {
-		mux.Handle("/", http.FileServer(http.FS(webFS)))
+		// 面板资源内嵌随 exe 更新，禁止浏览器缓存旧页面。
+		mux.Handle("/", noCacheFS(http.FileServer(http.FS(webFS))))
 	}
 	s.mux = mux
 	s.srv = &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return s
+}
+
+// noCacheFS 给内嵌面板响应加禁缓存头，避免 exe 更新后浏览器仍用旧页面。
+func noCacheFS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Handler 返回管理后台路由，供统一入口直接挂载；不依赖独立监听端口。
@@ -574,8 +583,8 @@ func (s *Server) handleFishTVTest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "channel 取值 24..31")
 		return
 	}
-	if req.Kind < -36 || req.Kind > 36 {
-		httpError(w, 400, "kind 取值 -36..36")
+	if req.Kind < -36 || req.Kind > 999 {
+		httpError(w, 400, "kind 取值 -36..999")
 		return
 	}
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{

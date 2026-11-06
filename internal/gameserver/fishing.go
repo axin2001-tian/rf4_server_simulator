@@ -47,6 +47,7 @@ type FishState struct {
 	lastPushGUID   string      // 最近一尾已下发的鱼（防同一条竿出现两尾在途）
 	lastPushAt     time.Time
 	Hooked         bool
+	LoadSyncSent   bool // 本杆是否已推过 14/8 首次全量钓组快照（搏鱼中只推一次）
 	Resolved       bool
 	Pending        *RolledFish
 	biteTimer      *time.Timer
@@ -1316,6 +1317,31 @@ func (s *Session) claimFishPush(guid string) bool {
 	return true
 }
 
+// markFishAnnounced 记录该鱼已发过落地播报（窗口内 notifyFishKept 跳过）。
+func (s *Session) markFishAnnounced(guid string) {
+	if guid == "" {
+		return
+	}
+	s.landedMu.Lock()
+	s.landedGUID = guid
+	s.landedAt = time.Now()
+	s.landedMu.Unlock()
+}
+
+// fishAnnouncedWindow 落地播报后抑制同鱼“入护”行的窗口
+// （入护结算可能晚于落地播报数秒，窗口取宽些）。
+const fishAnnouncedWindow = 30 * time.Second
+
+// fishAnnounced 该鱼是否刚发过落地播报（与 markFishAnnounced 同窗口）。
+func (s *Session) fishAnnounced(guid string) bool {
+	if guid == "" {
+		return false
+	}
+	s.landedMu.Lock()
+	defer s.landedMu.Unlock()
+	return s.landedGUID == guid && time.Since(s.landedAt) < fishAnnouncedWindow
+}
+
 // scheduleBite 排咬钩定时器（重抛作废上一杆）。
 func (s *Server) scheduleBite(sess *Session, st *FishState) bool {
 	return s.scheduleBiteState(sess, st, false, true)
@@ -1355,6 +1381,10 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	st.CastActive = true
 	st.Resolved = false
 	st.Pending = nil
+	// 新一杆/重排：上一尾的"在途推送"窗口作废，否则同一杆内的二次咬钩
+	// （路亚脱钩后再咬）会被单尾闸误挡。
+	st.lastPushGUID = ""
+	st.lastPushAt = time.Time{}
 	if !preserveHooked {
 		st.Hooked = false
 	}
@@ -1645,11 +1675,13 @@ func (s *Server) fishLandedText(f *RolledFish, newRecord bool) string {
 }
 
 // fishKeptText 入护提示文本。
+// 【备份】2026-11-06 定稿：普通鱼（未达标）不再进入护播报，本函数暂停
+// 使用；需要恢复时把 notifyFishKept 末尾的调用注释放开即可。
 func (s *Server) fishKeptText(f *RolledFish) string {
 	if s == nil || f == nil {
 		return ""
 	}
-	return fmt.Sprintf("入护：%s %s", s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG))
+	return fmt.Sprintf("未达标：%s %s", s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG))
 }
 
 // fishReleasedText 放生提示文本；奖杯/蓝冠附档位。
@@ -1677,46 +1709,51 @@ func (s *Server) fishEscapeText(f *RolledFish, reason string) string {
 		s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG), reason)
 }
 
-// notifyFishLanded 播报蓝冠、奖杯和破纪录；普通鱼由结算卡展示。
+// notifyFishLanded 按鱼档位播报：蓝冠(kind25 橙金)、奖杯(kind26 橙黄)、
+// 达标(kind3 蓝)；未达标普通鱼只在入护时提示，破个人纪录不单独播报。
 func (s *Server) notifyFishLanded(sess *Session, f *RolledFish, newRecord bool) {
 	if sess == nil || f == nil {
 		return
 	}
-	// 官方模板参数：键1=鱼种key（客户端本地化），键2=重量克（/1000 千克）。
-	// fish_tv_kv 默认 0：KV 推送曾在客户端触发解析异常断连（回登录界面），
-	// 编码经面板 kv_shape=30 探测确认后置 1 启用。
-	var kv *proto.Value
-	if s.tunableF("fish_tv_kv", 0) != 0 {
-		kv = fishTVKv(f.Species, f.WeightG)
-	}
-	// 没有 KV 参数时不能推模板：客户端会拿默认值把 27/25、27/26 渲染成
-	// “稀有鱼，0 克”。这种情况退回普通文本播报，至少鱼种和重量是对的。
-	label := ""
+	// 面板实测（2026-11-06）：键1 发合法鱼种 key 时客户端按鱼种品质染色
+	// （普通鱼白、金鱼金）；发查不到的文本（如中文名）则文本原样保留并
+	// 使用模板颜色 —— kind25 橙金（模板自带“超级稀有鱼”）、kind26 橙黄
+	// （自带“稀有鱼”）、kind3 蓝（达标播报，无等级字样）。
+	// 因此键1 发中文鱼名、按等级选 kind。
+	kind := 0
 	switch {
 	case f.Grade >= 4:
-		label = "超级稀有鱼"
+		kind = 25
 	case f.Grade == 3:
-		label = "稀有鱼"
-	case newRecord:
-		label = "新纪录"
+		kind = 26
+	case f.Grade == 2:
+		kind = 3 // 达标播报
 	}
-	if label != "" && kv == nil {
+	// fish_tv_kv 默认 1：KV 编码已经真机面板长期验证（不踢线、染色正确），
+	// 面板仍可置 0 回退纯文本。
+	if kind != 0 && s.tunableF("fish_tv_kv", 1) != 0 {
 		name := s.speciesZhName(s.dbCtx(), f.Species)
 		if name == "" {
 			name = f.Species
 		}
-		if name != "" {
-			sess.pushSystemChat(fmt.Sprintf("%s：%s %s", label, name, formatWeightG(f.WeightG)))
-			return
-		}
+		sess.pushChatProbe(27, kind, "", fishTVKv(name, f.WeightG))
+		sess.markFishAnnounced(f.FishGUID)
+		return
 	}
-	switch {
-	case f.Grade >= 4:
-		sess.pushChatProbe(27, 25, "", kv) // 超级稀有鱼 X 千克
-	case f.Grade == 3:
-		sess.pushChatProbe(27, 26, "", kv) // 稀有鱼 X 千克
-	case newRecord:
-		sess.pushChatProbe(27, 3, "", kv) // 玩家，鱼名 X 千克
+	// 没有 KV 参数时不能推模板：客户端会拿默认值把 27/25、27/26 渲染成
+	// “稀有鱼，0 克”。这种情况退回普通文本播报，至少鱼种和重量是对的。
+	if kind != 0 {
+		name := s.speciesZhName(s.dbCtx(), f.Species)
+		if name == "" {
+			name = f.Species
+		}
+		tag := ""
+		if kind == 25 {
+			tag = "超级稀有鱼 "
+		} else if kind == 26 {
+			tag = "稀有鱼 "
+		}
+		sess.pushSystemChat(fmt.Sprintf("%s%s %s", tag, name, formatWeightG(f.WeightG)))
 	}
 }
 
@@ -1730,9 +1767,16 @@ func (s *Server) notifyFishKept(sess *Session, f *RolledFish) {
 	if f.Grade >= 3 {
 		return
 	}
-	if text := s.fishKeptText(f); text != "" {
-		sess.pushSystemChat(text)
+	// 达标/奖杯/蓝冠落地播报刚发过（markFishAnnounced），跳过“未达标”
+	// 行避免同鱼刷两行。
+	if sess.fishAnnounced(f.FishGUID) {
+		return
 	}
+	// 【2026-11-06 定稿】未达标普通鱼不再发入护播报（聊天只留彩色播报）。
+	// 恢复“未达标：鱼名 重量”提示时放开下面两行：
+	// if text := s.fishKeptText(f); text != "" {
+	// 	sess.pushSystemChat(text)
+	// }
 }
 
 // notifyFishReleased 放生播报。
@@ -1748,6 +1792,9 @@ func (s *Server) notifyFishReleased(sess *Session, f *RolledFish) {
 // escapeTemplateKind 跑鱼原因 → 官方聊天模板类型（401.f0）。
 // 客户端内置本地化模板：4=鱼线轮损坏 5=鱼竿损坏 6=鱼线拉断
 // 7=鱼脱钩 10=牙齿咬断钓组 30=引线(子线)断了。
+// 【备份】2026-11-06 定稿：跑鱼提示统一改用 kind3 蓝色自由文案
+// （“你的鱼跑了, 重量”），本映射暂停使用；恢复官方分原因文案时把
+// notifyFishEscape 改回 pushChatProbe(27, escapeTemplateKind[reason], "", nil)。
 var escapeTemplateKind = map[string]int{
 	"脱钩": 7, "脱钩离开": 7, "咬钩未刺中": 7,
 	"断主线": 6, "断子线": 30,
@@ -1756,19 +1803,54 @@ var escapeTemplateKind = map[string]int{
 	"钓组组件断裂": 10,
 }
 
-// notifyFishEscape 在鱼丢失（脱钩/断线/超时等）时经聊天频道推送提示。
-// 官方模板样式（"player 鱼线拉断了"）；未知原因回退自由文本。
+// fishEscapeTaunts 跑鱼嘲讽词池：随机抽一条拼进跑鱼提示。
+var fishEscapeTaunts = []string{
+	"真是FW啊",
+	"这都能跑",
+	"煮熟的鸭子飞了",
+	"手滑了吧",
+	"竿子太拉了",
+	"鱼比人聪明",
+	"白忙活一场",
+	"差亿点点",
+	"又给跑了",
+	"空军预定",
+	"打龟佬",
+}
+
+// notifyFishEscape 跑鱼提示：类型3（蓝色 KV 模板），文案带随机语气词，
+// 重量走键2（客户端模板句尾自动显示“X 克/公斤”）。
+// fish_escape_taunt=0 时回退官方类型7模板（“鱼脱钩了”）。
 func (s *Server) notifyFishEscape(sess *Session, f *RolledFish, reason string) {
 	if s == nil || sess == nil {
 		return
 	}
-	if kind, ok := escapeTemplateKind[reason]; ok {
-		sess.pushChatProbe(27, kind, "", nil)
+	if s.tunableF("fish_escape_taunt", 1) == 0 {
+		sess.pushChatProbe(27, 7, "", nil)
 		return
 	}
-	if text := s.fishEscapeText(f, reason); text != "" {
-		sess.pushSystemChat(text)
+	weight := int64(0)
+	name := ""
+	tier := ""
+	if f != nil {
+		if f.WeightG > 0 {
+			weight = f.WeightG
+		}
+		name = s.speciesZhName(s.dbCtx(), f.Species)
+		if name == "" {
+			name = f.Species
+		}
+		if f.Grade >= 4 {
+			tier = "超级稀有 "
+		} else if f.Grade == 3 {
+			tier = "稀有 "
+		}
 	}
+	taunt := fishEscapeTaunts[rand.Intn(len(fishEscapeTaunts))]
+	// 客户端 KV 模板恒在句尾追加“X 克/公斤”段（缺键2 显示“0 克”），
+	// 重量只能放句尾：文案不带重量数字，键2 带真实重量。
+	text := "你的 " + tier + name + "，跑掉了，" + taunt + "！"
+	sess.pushChatProbe(27, 3, "", fishTVKv(text, weight))
 }
 
 // bumpFishingCounter 增加玩家钓鱼计数器（escapes 等），幂等累加。

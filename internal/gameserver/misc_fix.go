@@ -6,6 +6,7 @@ package gameserver
 // 相同命令，因此这里只负责补齐缺失的处理。
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -512,8 +513,13 @@ func (s *Session) pushChatRaw(variant, kind int, text string) {
 }
 
 // fishTVKv 构造 401.f4 的鱼名和重量参数。
-// 官方模板（面板 kv_shape=30 探测确认）是 KV 数组：键1=鱼种key、
-// 键2=重量克、键6=榜单类型（字符串）。缺键 6 时模板渲染出来是空档位。
+// 2026-11-06 面板实证（shape 72，客户端渲染成功且不掉线）：
+//   - 容器 = [0x03][1B len "135"][u16 count][元素...]，类型名是 njhhjeijlim
+//     序号字符串 "135"（argcode_table.json by_elem: wiregen 400 → 135）；
+//   - 元素带 typed 对象头 [0x01][u32le 400]（wiregen typeid，非序号）；
+//   - 键1 = 鱼种文本（0x14 短字符串）、键2 = 重量（0x0D u32，客户端 /1000f 转千克）。
+// 历史上"元素不能套对象头"的结论是误诊：真实根因是类型名 "dejdolfnooh"
+// 解析失败导致整条流错位。
 func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	if fishKey == "" {
 		fishKey = "g_tench"
@@ -521,11 +527,23 @@ func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	if weightG < 0 {
 		weightG = 0
 	}
-	return proto.KVList(
-		proto.KVEntry{Key: 1, Val: proto.StrVal(fishKey)},
-		proto.KVEntry{Key: 2, Val: proto.U32(uint32(weightG))},
-		proto.KVEntry{Key: 6, Val: proto.StrVal("0")},
-	)
+	head := append([]byte{}, fishKVElem(1, 0, true)[:5]...) // [0x01][u32le 400] typed 头
+	k1 := append(head, 0x01, 0x14, byte(len(fishKey)))
+	k1 = append(k1, fishKey...)
+	k2 := fishKVElem(2, uint32(weightG), true)
+	return fishKVRaw(fishKVArr("135", 2, k1, k2))
+}
+
+// fishTVKvText 只有键1（自由文本）的 KV：重量已写进文案时用，
+// 避免客户端模板在句尾再追加一次重量。
+func fishTVKvText(text string) *proto.Value {
+	if text == "" {
+		text = "..."
+	}
+	head := append([]byte{}, fishKVElem(1, 0, true)[:5]...) // [0x01][u32le 400] typed 头
+	k1 := append(head, 0x01, 0x14, byte(len(text)))
+	k1 = append(k1, text...)
+	return fishKVRaw(fishKVArr("135", 1, k1))
 }
 
 // fishTVKvShape 按 shape 编号构造 401.f4 钓获模板 KV 参数（键1=鱼种key
@@ -618,6 +636,77 @@ func fishTVKvShape(shape int64, fishKey string, weightG int64) *proto.Value {
 		list := fishTVKv(v1, w)
 		return &proto.Value{Kind: proto.KindKVList, Items: append(list.Items,
 			&proto.Value{Kind: proto.KindKVEntry, Marker: 6, Items: []*proto.Value{proto.StrVal(v6)}})}
+	case 60, 61:
+		// 元素不带对象头（[键][值]），对应客户端 plbmkhnmeim 的读法。
+		// 60：键 2 用 int marker 0x0D；61：键 2 用 0x13。
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		marker := byte(0x0D)
+		if shape == 61 {
+			marker = 0x13
+		}
+		return proto.KVListRaw("dejdolfnooh",
+			proto.KVEntry{Key: 1, Val: proto.StrVal(v1)},
+			proto.KVEntry{Key: 2, Val: proto.U32(uint32(w), marker)},
+			proto.KVEntry{Key: 6, Val: proto.StrVal(v6)},
+		)
+	// ---- 原始字节穷举（2026-11-06：1-51/60/61/40-45 全部静默丢弃后的组合扫描）----
+	// 容器框架逐项变化：count 宽度 u32/u8、元素裸/typed、类型名长度 1/2 字节。
+	// 元素值统一 int marker 0x0D；重量默认 3280。
+	case 62: // 无容器 marker：[u32 count][裸元素]
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		b := append(proto.PackU32(1), fishKVElem(2, uint32(w), false)...)
+		return fishKVRaw(b)
+	case 63: // 无容器 marker：[u8 count][裸元素]
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		b := append([]byte{1}, fishKVElem(2, uint32(w), false)...)
+		return fishKVRaw(b)
+	case 64: // 无容器 marker：[u32 count][typed 元素 01+400]
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		b := append(proto.PackU32(1), fishKVElem(2, uint32(w), true)...)
+		return fishKVRaw(b)
+	case 65: // [0x03][u16 长度类型名][u16 count][裸元素]——2 字节长度类型名从未测过
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		b := []byte{0x03, 0x0B, 0x00}
+		b = append(b, "dejdolfnooh"...)
+		b = append(b, proto.PackU16(1)...)
+		b = append(b, fishKVElem(2, uint32(w), false)...)
+		return fishKVRaw(b)
+	case 66: // [0x03][1B 长度类型名][u8 count][typed 元素]
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		b := []byte{0x03, 0x0B}
+		b = append(b, "dejdolfnooh"...)
+		b = append(b, 0x01)
+		b = append(b, fishKVElem(2, uint32(w), true)...)
+		return fishKVRaw(b)
+	// ---- 数字字符串类型名（2026-11-06 运行时证据）----
+	// 客户端日志实证：所有 "dejdolfnooh" 类型名变体均报
+	// OpenTypeResolver.GetType not found: dejdolfnooh；无 marker 变体报
+	// KeyNotFoundException(错位 typeid)。njhhjeijlim 的 string→Type 字典键
+	// = hgjpmjhjkgg attribute 序号的十进制字符串，与 wiregen typeid 同体系，
+	// 类型名 = njhhjeijlim 序号（argcode_table.json by_elem）：400(dejdolfnooh) → "135"。
+	// 格式：[0x03][1B len "400"][u16 count][0x01][u32le 400][键][0x0D][u32le 重量]
+	case 67: // 类型名 "400"，键=2（重量）
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		return fishKVRaw(fishKVArr("135", 1, fishKVElem(2, uint32(w), true)))
+	case 68: // 类型名 "400"，键=0
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		return fishKVRaw(fishKVArr("135", 1, fishKVElem(0, uint32(w), true)))
+	case 69: // 类型名 "400"，键=1
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		return fishKVRaw(fishKVArr("135", 1, fishKVElem(1, uint32(w), true)))
+	case 70: // 类型名 "400"，键=3
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		return fishKVRaw(fishKVArr("135", 1, fishKVElem(3, uint32(w), true)))
+	case 71: // 类型名 "400"，键=4
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		return fishKVRaw(fishKVArr("135", 1, fishKVElem(4, uint32(w), true)))
+	case 72: // 类型名 "400"，双元素：键1=鱼种文本 + 键2=重量
+		w, _ := strconv.ParseInt(v2, 10, 64)
+		head := append([]byte{}, fishKVElem(1, 0, true)[:5]...) // [0x01][u32le 400] typed 头
+		k1 := append(head, 0x01, 0x14, byte(len(v1)))
+		k1 = append(k1, v1...)
+		k2 := fishKVElem(2, uint32(w), true)
+		return fishKVRaw(fishKVArr("135", 2, k1, k2))
 	case 40:
 		return &proto.Value{Kind: proto.KindKVList}
 	case 41:
@@ -644,6 +733,38 @@ func fishTVKvShape(shape int64, fishKey string, weightG int64) *proto.Value {
 			proto.KVEntry{Key: 2, Val: proto.U32(uint32(w))})
 	}
 	return nil
+}
+
+// fishKVRaw 把原始字节包成直通探测值（KindRaw：Hex 原样上线）。
+func fishKVRaw(b []byte) *proto.Value {
+	return &proto.Value{Kind: proto.KindRaw, Hex: hex.EncodeToString(b)}
+}
+
+// fishKVArr 构造 0x03 对象数组容器：[0x03][1B len 类型名][u16 count][元素...]。
+// 类型名必须是 njhhjeijlim 数字字符串（wiregen typeid 十进制），如 "400"。
+func fishKVArr(typeName string, count int, elems ...[]byte) []byte {
+	b := []byte{0x03, byte(len(typeName))}
+	b = append(b, typeName...)
+	b = append(b, proto.PackU16(uint32(count))...)
+	for _, e := range elems {
+		b = append(b, e...)
+	}
+	return b
+}
+
+// fishKVElem 构造单个 dejdolfnooh KV 元素字节：
+//
+//	typed=false：[键][int marker 0x0D][u32le 重量]（裸元素，plbmkhnmeim 直读）
+//	typed=true ：[0x01][u32le 400][键][0x0D][u32le 重量]（通用 marker 分发读法）
+func fishKVElem(key byte, weight uint32, typed bool) []byte {
+	var b []byte
+	if typed {
+		b = append(b, 0x01)
+		b = append(b, proto.PackU32(400)...)
+	}
+	b = append(b, key, 0x0D)
+	b = append(b, proto.PackU32(weight)...)
+	return b
 }
 
 // hSocialCurrent 处理 24/3 social/current / 24/2 social/auto：
