@@ -512,6 +512,9 @@ func (s *Session) pushChatRaw(variant, kind int, text string) {
 }
 
 // fishTVKv 构造 401.f4 的鱼名和重量参数。
+// 客户端 f4 数组读取走类型名字符串解析，键必须来自类型名对应的注册类型，
+// 因此容器类型名须用 "135"（dejdolfnooh 的注册名），元素带 typed 对象头；
+// 键1 = 鱼种key（短字符串），键2 = 重量克（int，客户端除以 1000 转千克）。
 func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	if fishKey == "" {
 		fishKey = "g_tench"
@@ -519,9 +522,9 @@ func fishTVKv(fishKey string, weightG int64) *proto.Value {
 	if weightG < 0 {
 		weightG = 0
 	}
-	return proto.KVList(
+	return proto.KVListCustom("135",
 		proto.KVEntry{Key: 1, Val: proto.StrVal(fishKey)},
-		proto.KVEntry{Key: 2, Val: proto.U32(uint32(weightG))},
+		proto.KVEntry{Key: 2, Val: proto.U32(uint32(weightG), 0x0D)},
 	)
 }
 
