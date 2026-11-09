@@ -59,7 +59,7 @@ func (s *Server) prepareFishRollRuntime(ctx context.Context, c *fishRollContext,
 	}
 	if !c.runtime.levelChecked {
 		c.runtime.levelChecked = true
-		levelKey := travelLevelKey(c.loc)
+		levelKey := levelKeyForLoc(c.loc)
 		c.runtime.chartKnown = sonarChartLevel(levelKey)
 		if c.runtime.chartKnown && c.hasPos {
 			c.runtime.zone, c.runtime.zoneKnown = sonarZoneForPoint(levelKey, c.x, c.z)

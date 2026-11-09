@@ -187,7 +187,6 @@ func (c *Config) applyEnvOverrides() {
 			}
 		}
 	}
-
 	envStr("RF4_LOG_LEVEL", &c.Log.Level)
 	envStr("RF4_LOG_FORMAT", &c.Log.Format)
 	envStr("RF4_SQLITE_PATH", &c.SQLite.Path)

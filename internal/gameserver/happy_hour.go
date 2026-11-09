@@ -47,8 +47,27 @@ func (sess *Session) updateHappyHour(now time.Time, closing bool) store.HappyHou
 		return store.HappyHourStatus{}
 	}
 	sess.happyMu.Lock()
+	prevActive := sess.happyStatus.Active
 	sess.happyStatus = status
 	sess.happyMu.Unlock()
+
+	// 抛竿进入欢乐时光的那一拍：把档案推给客户端一次。客户端靠档案里
+	// 第 24 块的状态从 1(Ready) 变成 3(Activated) 来弹「欢乐时光开始了」提示
+	// （kNotification_HappyHourStart），不推档案客户端就永远看不到这个变化。
+	// 只在「不活跃 -> 活跃」的边上推一次，保活不会反复弹。
+	if status.Active && !prevActive {
+		sess.happyMu.Lock()
+		fire := !sess.happyStartNotified
+		sess.happyStartNotified = true
+		sess.happyMu.Unlock()
+		if fire {
+			sess.Push2_1()
+		}
+	} else if !status.Active {
+		sess.happyMu.Lock()
+		sess.happyStartNotified = false
+		sess.happyMu.Unlock()
+	}
 	return status
 }
 

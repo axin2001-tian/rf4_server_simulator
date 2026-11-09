@@ -20,20 +20,21 @@ import (
 
 // settleXpResult 保存一次钓获结算的经验分解和结算状态。
 type settleXpResult struct {
-	bonuses         []catchXPBonus
-	droppedCardGUID string
-	premiumXP       int64
-	replayed        bool
-	baseXP          int64   // 技能倍率后的裸经验（分解中的"基础经验"）
-	totalXP         int64   // 310.f0 = 本条鱼总经验
-	silver          int64   // 展示用银价（catch_silver_cents 口径，不入账）
-	prevBest        int64   // 该鱼种已有纪录重量（813.f6）
-	newLevel        int64   // grant 后等级
-	totalXp         int64   // grant 后累计经验
-	levelsGained    int64   // 本次升级数（310.f1）
-	isRecord        bool    // 是否破个人纪录
-	skillID         int64   // 310.f2 钓法大类（1 浮钓 / 2 纺车 / 3 底钓 / 11 海钓）
-	skillGain       float64 // 310.f3 本次实际熟练度增量
+	bonuses            []catchXPBonus
+	droppedCardGUID    string
+	droppedGiftBagGUID string
+	premiumXP          int64
+	replayed           bool
+	baseXP             int64   // 技能倍率后的裸经验（分解中的"基础经验"）
+	totalXP            int64   // 310.f0 = 本条鱼总经验
+	silver             int64   // 展示用银价（catch_silver_cents 口径，不入账）
+	prevBest           int64   // 该鱼种已有纪录重量（813.f6）
+	newLevel           int64   // grant 后等级
+	totalXp            int64   // grant 后累计经验
+	levelsGained       int64   // 本次升级数（310.f1）
+	isRecord           bool    // 是否破个人纪录
+	skillID            int64   // 310.f2 钓法大类（1 浮钓 / 2 纺车 / 3 底钓 / 11 海钓）
+	skillGain          float64 // 310.f3 本次实际熟练度增量
 }
 
 // grantXpMonotonic 增加累计经验并重算等级，保证等级不下降。
@@ -219,7 +220,7 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 		return [6]int64{111, 222, 333, 444, 555, 666}
 	}
 	if st, ok := speciesFightStatics[species]; ok {
-		return st
+		return s.scaleSettleStatics(st)
 	}
 	f1, f2 := int64(1600), int64(2700)
 	if s.DB != nil {
@@ -247,7 +248,25 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 	f3 := int64(math.Round(float64(f2) * 1.25))
 	f4 := int64(math.Round(float64(f2) * 1.1))
 	f5 := int64(math.Round(float64(f2) * 1.2))
-	return [6]int64{f0, f1, f2, f3, f4, f5}
+	return s.scaleSettleStatics([6]int64{f0, f1, f2, f3, f4, f5})
+}
+
+// scaleSettleStatics 把标尺阈值组与 fish_weight_scale 同步缩放。
+// 鱼重按倍率放大后，结算界面标尺的达标/奖杯/蓝冠刻度必须同步放大，
+// 否则鱼重量位置远超阈值范围，客户端标尺栏标记全部挤到左端。
+// 阈值同步缩放后档位判定与标尺位置保持一致（倍率只放大重量/经验，不虚增档位）。
+func (s *Server) scaleSettleStatics(st [6]int64) [6]int64 {
+	scale := s.tunableF("fish_weight_scale", 1)
+	if scale <= 0 {
+		scale = 1
+	}
+	if scale == 1 {
+		return st
+	}
+	for i, v := range st {
+		st[i] = int64(math.Round(float64(v) * scale))
+	}
+	return st
 }
 
 // buildSettle813 构造 813 搏斗统计块：f8 是 310 经验块，f9 是 25 鱼条目。
@@ -401,6 +420,23 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 			grants.Items = append(grants.Items, tree)
 		}
 	}
+	// 咬钩钓到的福袋与掉卡同一路径：塞进 801 的奖励列表，
+	// 客户端才会在结算界面显示袋子并同步进背包。
+	if hasFish && res.droppedGiftBagGUID != "" {
+		bag, err := s.DB.GetItemByGUID(cctx, res.droppedGiftBagGUID)
+		if err != nil {
+			ctx.ReplyFailure("System.IO.IOException", "福袋未能读取，请重试")
+			return nil, true
+		}
+		if bag.UID == uid && bag.Container == "backpack" {
+			tree, err := s.ItemToTree(cctx, bag)
+			if err != nil {
+				ctx.ReplyFailure("System.IO.IOException", "福袋未能显示，请重试")
+				return nil, true
+			}
+			grants.Items = append(grants.Items, tree)
+		}
+	}
 	obj801, err := wiregen.MakeObj("caagocpofin", map[int]*proto.Value{
 		0:  f0,
 		1:  proto.U32(s.castDistanceBitsForRig(cctx, uid, gearGUID, rigType)),
@@ -434,6 +470,11 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 	if hasFish && res.droppedCardGUID != "" {
 		if card, err := s.DB.GetItemByGUID(cctx, res.droppedCardGUID); err == nil && card.UID == uid && card.Container == tradingCardContainer {
 			ctx.AfterResponse(func() { s.pushItemUpdate(uid, card) })
+		}
+	}
+	if hasFish && res.droppedGiftBagGUID != "" {
+		if bag, err := s.DB.GetItemByGUID(cctx, res.droppedGiftBagGUID); err == nil && bag.UID == uid && bag.Container == "backpack" {
+			ctx.AfterResponse(func() { s.pushItemUpdate(uid, bag) })
 		}
 	}
 	// 收竿时补挂同种库存，供客户端校验下一次抛竿；搏鱼中不补挂。

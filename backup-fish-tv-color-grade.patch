@@ -1,0 +1,241 @@
+﻿From da620d7e4f7f8fcc415eb584ef2873b879613d06 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Fri, 6 Nov 2026 21:25:16 +0800
+Subject: [PATCH] =?UTF-8?q?=E4=B8=8A=E9=B1=BC=E6=92=AD=E6=8A=A5=E6=8C=89?=
+ =?UTF-8?q?=E6=A1=A3=E4=BD=8D=E5=BD=A9=E8=89=B2=E6=9F=93=E8=89=B2=E5=B9=B6?=
+ =?UTF-8?q?=E5=8E=BB=E9=87=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 键1 改发中文鱼名：客户端对查不到的键按模板颜色原样显示，合法鱼种 key
+  才会按品质染色；因此按档位选 kind（蓝冠 25 橙金/奖杯 26 橙黄/达标 3 蓝），
+  键1 发中文名
+- fish_tv_kv 默认 1（KV 编码修复后真机稳定），面板可置 0 回退纯文本
+- 落地播报记录 FishGUID（30 秒窗口），同鱼入护结算不再重复刷一行；
+  未达标普通鱼不再发入护播报
+- 新增去重窗口回归测试
+---
+ internal/admin/web/index.html              |  2 +-
+ internal/gameserver/fish_announce_test.go  | 24 ++++++
+ internal/gameserver/fishing.go             | 95 ++++++++++++++++------
+ internal/gameserver/fishing_notify_test.go |  2 +-
+ internal/gameserver/session.go             |  6 ++
+ 5 files changed, 102 insertions(+), 27 deletions(-)
+ create mode 100644 internal/gameserver/fish_announce_test.go
+
+diff --git a/internal/admin/web/index.html b/internal/admin/web/index.html
+index 43159fa..383dc9e 100644
+--- a/internal/admin/web/index.html
++++ b/internal/admin/web/index.html
+@@ -150,7 +150,7 @@ const TUNABLE_DEFS=[
+   ['settle_scale_debug','结算刻度调试（0=关）',0],
+   ['fish_tv_channel','鱼汛聊天通道（24..31，27=公聊）',27],
+   ['fish_tv_kind','鱼汛消息类型（401.f0，0=发言）',0],
+-  ['fish_tv_kv','鱼汛KV参数（1=鱼名+重量，未确认前勿开）',0],
++  ['fish_tv_kv','鱼汛KV参数（1=彩色播报，0=白色纯文本）',1],
+ ];
+ async function loadTunables(){
+  const t=await api('/api/tunables');
+diff --git a/internal/gameserver/fish_announce_test.go b/internal/gameserver/fish_announce_test.go
+new file mode 100644
+index 0000000..96dc7d1
+--- /dev/null
++++ b/internal/gameserver/fish_announce_test.go
+@@ -0,0 +1,24 @@
++package gameserver
++
++import (
++	"testing"
++	"time"
++)
++
++// TestFishAnnouncedWindow 回归：落地播报去重窗口内命中同鱼，跨窗/异鱼不命中。
++func TestFishAnnouncedWindow(t *testing.T) {
++	sess := &Session{}
++	sess.markFishAnnounced("g1")
++	if !sess.fishAnnounced("g1") {
++		t.Fatal("刚记录的鱼应在窗口内")
++	}
++	if sess.fishAnnounced("g2") {
++		t.Fatal("其他 GUID 不应命中")
++	}
++	sess.landedMu.Lock()
++	sess.landedAt = time.Now().Add(-fishAnnouncedWindow - time.Second)
++	sess.landedMu.Unlock()
++	if sess.fishAnnounced("g1") {
++		t.Fatal("超窗后不应命中")
++	}
++}
+diff --git a/internal/gameserver/fishing.go b/internal/gameserver/fishing.go
+index d422dbf..fde83e6 100644
+--- a/internal/gameserver/fishing.go
++++ b/internal/gameserver/fishing.go
+@@ -1505,6 +1505,31 @@ func (s *Session) claimFishPush(guid string) bool {
+ 	return true
+ }
+ 
++// markFishAnnounced 记录该鱼已发过落地播报（窗口内 notifyFishKept 跳过）。
++func (s *Session) markFishAnnounced(guid string) {
++	if guid == "" {
++		return
++	}
++	s.landedMu.Lock()
++	s.landedGUID = guid
++	s.landedAt = time.Now()
++	s.landedMu.Unlock()
++}
++
++// fishAnnouncedWindow 落地播报后抑制同鱼“入护”行的窗口
++// （入护结算可能晚于落地播报数秒，窗口取宽些）。
++const fishAnnouncedWindow = 30 * time.Second
++
++// fishAnnounced 该鱼是否刚发过落地播报（与 markFishAnnounced 同窗口）。
++func (s *Session) fishAnnounced(guid string) bool {
++	if guid == "" {
++		return false
++	}
++	s.landedMu.Lock()
++	defer s.landedMu.Unlock()
++	return s.landedGUID == guid && time.Since(s.landedAt) < fishAnnouncedWindow
++}
++
+ // scheduleBite 排咬钩定时器（重抛作废上一杆）。
+ func (s *Server) scheduleBite(sess *Session, st *FishState) bool {
+ 	return s.scheduleBiteState(sess, st, false, true)
+@@ -1825,12 +1850,13 @@ func (s *Server) fishLandedText(f *RolledFish, newRecord bool) string {
+ 	return ""
+ }
+ 
+-// fishKeptText 入护提示文本。
++// fishKeptText 入护提示文本。当前入护播报已停用（见 notifyFishKept），
++// 文案保留备查；需要恢复时把 notifyFishKept 末尾的调用注释放开即可。
+ func (s *Server) fishKeptText(f *RolledFish) string {
+ 	if s == nil || f == nil {
+ 		return ""
+ 	}
+-	return fmt.Sprintf("入护：%s %s", s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG))
++	return fmt.Sprintf("未达标：%s %s", s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG))
+ }
+ 
+ // fishReleasedText 放生提示文本；奖杯/蓝冠附档位。
+@@ -1858,34 +1884,47 @@ func (s *Server) fishEscapeText(f *RolledFish, reason string) string {
+ 		s.speciesZhName(s.dbCtx(), f.Species), formatWeightG(f.WeightG), reason)
+ }
+ 
+-// notifyFishLanded 播报蓝冠、奖杯和破纪录；普通鱼由结算卡展示。
++// notifyFishLanded 按鱼档位播报：蓝冠(kind25 橙金)、奖杯(kind26 橙黄)、
++// 达标(kind3 蓝)；未达标普通鱼只在入护时提示，破个人纪录不单独播报。
++// 键1 发合法鱼种 key 时客户端按鱼种品质染色，发查不到的文本则原样保留
++// 并使用模板自带颜色；因此键1 发中文鱼名、按档位选 kind。
+ func (s *Server) notifyFishLanded(sess *Session, f *RolledFish, newRecord bool) {
+ 	if sess == nil || f == nil {
+ 		return
+ 	}
+-	// 官方模板参数：键1=鱼种key（客户端本地化），键2=重量克（/1000 千克）。
+-	// fish_tv_kv 默认 0：KV 推送曾在客户端触发解析异常断连（回登录界面），
+-	// 编码经面板 kv_shape=30 探测确认后置 1 启用。
+-	var kv *proto.Value
+-	if s.tunableF("fish_tv_kv", 0) != 0 {
+-		kv = fishTVKv(f.Species, f.WeightG)
+-	}
+-	// k25/k26/k03 是带参数的官方模板播报，依赖 401.f4 模板参数；KV 未启用
+-	// （kv==nil）时客户端解析模板缺参会抛异常断连（回登录界面）。此时退化
+-	// 为已验证的普通系统文本播报，保留提示且不掉线。
+-	if kv == nil {
+-		if text := s.fishLandedText(f, newRecord); text != "" {
+-			sess.pushSystemChat(text)
+-		}
+-		return
+-	}
++	kind := 0
+ 	switch {
+ 	case f.Grade >= 4:
+-		sess.pushChatProbe(27, 25, "", kv) // 超级稀有鱼 X 千克
++		kind = 25
+ 	case f.Grade == 3:
+-		sess.pushChatProbe(27, 26, "", kv) // 稀有鱼 X 千克
+-	case newRecord:
+-		sess.pushChatProbe(27, 3, "", kv) // 玩家，鱼名 X 千克
++		kind = 26
++	case f.Grade == 2:
++		kind = 3 // 达标播报
++	}
++	// fish_tv_kv 默认 1：KV 编码真机验证稳定；面板可置 0 回退纯文本。
++	if kind != 0 && s.tunableF("fish_tv_kv", 1) != 0 {
++		name := s.speciesZhName(s.dbCtx(), f.Species)
++		if name == "" {
++			name = f.Species
++		}
++		sess.pushChatProbe(27, kind, "", fishTVKv(name, f.WeightG))
++		sess.markFishAnnounced(f.FishGUID)
++		return
++	}
++	// 没有 KV 参数时不能推模板：客户端会拿默认值把 27/25、27/26 渲染成
++	// “稀有鱼，0 克”。这种情况退回普通文本播报，至少鱼种和重量是对的。
++	if kind != 0 {
++		name := s.speciesZhName(s.dbCtx(), f.Species)
++		if name == "" {
++			name = f.Species
++		}
++		tag := ""
++		if kind == 25 {
++			tag = "超级稀有鱼 "
++		} else if kind == 26 {
++			tag = "稀有鱼 "
++		}
++		sess.pushSystemChat(fmt.Sprintf("%s%s %s", tag, name, formatWeightG(f.WeightG)))
+ 	}
+ }
+ 
+@@ -1894,9 +1933,15 @@ func (s *Server) notifyFishKept(sess *Session, f *RolledFish) {
+ 	if sess == nil {
+ 		return
+ 	}
+-	if text := s.fishKeptText(f); text != "" {
+-		sess.pushSystemChat(text)
++	// 达标/奖杯/蓝冠落地播报刚发过（markFishAnnounced），跳过同鱼
++	// 的入护行避免刷两行。
++	if sess.fishAnnounced(f.FishGUID) {
++		return
+ 	}
++	// 未达标普通鱼当前不发入护播报（聊天只保留彩色播报）；恢复时放开：
++	// if text := s.fishKeptText(f); text != "" {
++	// 	sess.pushSystemChat(text)
++	// }
+ }
+ 
+ // notifyFishReleased 放生播报。
+diff --git a/internal/gameserver/fishing_notify_test.go b/internal/gameserver/fishing_notify_test.go
+index 206303f..6a83d06 100644
+--- a/internal/gameserver/fishing_notify_test.go
++++ b/internal/gameserver/fishing_notify_test.go
+@@ -228,7 +228,7 @@ func TestFishEventChatTexts(t *testing.T) {
+ 	}
+ 
+ 	kept := srv.fishKeptText(tench(1, 547))
+-	if !strings.Contains(kept, "入护") || !strings.Contains(kept, "547g") {
++	if !strings.Contains(kept, "未达标") || !strings.Contains(kept, "547g") {
+ 		t.Fatalf("入护播报不符: %q", kept)
+ 	}
+ 	if strings.Contains(kept, "护内") {
+diff --git a/internal/gameserver/session.go b/internal/gameserver/session.go
+index b848f06..99f9744 100644
+--- a/internal/gameserver/session.go
++++ b/internal/gameserver/session.go
+@@ -43,6 +43,12 @@ type Session struct {
+ 	fishPushGUID string
+ 	fishPushAt   time.Time
+ 
++	// landedMu / landedGUID / landedAt 记录最近一条已发落地播报的鱼，
++	// 供 notifyFishKept 跳过同一尾鱼后续的“入护”行（避免刷两行）。
++	landedMu   sync.Mutex
++	landedGUID string
++	landedAt   time.Time
++
+ 	stateMu      sync.Mutex
+ 	state        map[string]any // 会话级业务状态（选图、抛竿状态等）
+ 	weatherMu    sync.RWMutex
+-- 
+2.54.0.windows.1
+

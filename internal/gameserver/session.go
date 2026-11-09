@@ -50,6 +50,9 @@ type Session struct {
 	happyMu      sync.RWMutex
 	happyOpMu    sync.Mutex
 	happyStatus  store.HappyHourStatus
+	// happyStartNotified 本次会话是否已经为「欢乐时光刚开始」推过档案，
+	// 避免保活每 5 秒重复触发客户端弹提示。
+	happyStartNotified bool
 
 	log *slog.Logger
 }

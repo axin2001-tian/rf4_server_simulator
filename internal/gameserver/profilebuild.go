@@ -41,11 +41,19 @@ func (s *Server) buildPose308(ctx context.Context, uid int64) *proto.Value {
 			primary, secondary = v.Primary, v.Secondary
 		}
 	}
+	// f8 是欢乐时光当天剩余分钟：客户端用这一段驱动角色面板的欢乐时光状态，
+	// 0 会被显示成「需要高级会员」，有值才显示已激活并倒计时。
+	hhMinutes := int64(0)
+	if s != nil && s.DB != nil {
+		if st, err := s.DB.GetHappyHourStatus(ctx, uid, time.Now()); err == nil && st.Qualified {
+			hhMinutes = (st.RemainingSeconds + 59) / 60
+		}
+	}
 	return wiregen.MustMakeObj("pnbphpdmppe", map[int]*proto.Value{
 		0: proto.F32(float32(primary)), 1: proto.F32(float32(secondary)), 2: proto.F32(0.0),
 		3: proto.F32(1.0), 4: proto.F32(0.0), 5: proto.F32(11.375), 6: proto.F32(0.0),
 		7: proto.U64(uint64(proto.WindowsFiletimeNow())),
-		8: proto.U32(0),
+		8: proto.U32(uint32(hhMinutes)),
 	})
 }
 
@@ -82,11 +90,13 @@ func buildStats322W(wNow int64) *proto.Value {
 	})
 }
 
-// build745 构造通行证状态块。
-func build745() *proto.Value {
+// build745 构造通行证/欢乐时光状态块。
+// f1 是客户端 RUIHappyHourWidget 显示的"剩余分钟"来源，之前固定 0，
+// 所以界面上永远是"剩余不到一分钟"。
+func build745(hhState int, hhMinutes int64) *proto.Value {
 	return wiregen.MustMakeObj("dnijhkbdfan", map[int]*proto.Value{
-		0: proto.U32(0),
-		1: proto.U32(0),
+		0: proto.U32(uint32(hhState)),
+		1: proto.U32(uint32(hhMinutes)),
 		2: proto.U64(pass745F2),
 	})
 }
@@ -211,6 +221,23 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 		s.log.Warn("稀有鱼计数读取失败，按 0 下发", "uid", uid, "err", rareErr)
 	}
 
+	// f24(pdomjfdnghk/dlgnjgfjcaj).emegkdcimkp 是欢乐时光状态枚举（客户端
+	// RUIHappyHourWidget 的 0~4 分支）：0=未开放（显示"需要高级会员"）、
+	// 1=已就绪、2=下一场时间、3=进行中（按剩余分钟倒计时）、4=今日已结束。
+	// 之前固定发 0，所以即使资格已发放，界面也永远显示"需要高级会员"。
+	hhState := 0
+	hhMinutes := int64(0)
+	if hh, hhErr := s.DB.GetHappyHourStatus(ctx, uid, time.Now()); hhErr == nil && hh.Qualified {
+		hhMinutes = (hh.RemainingSeconds + 59) / 60
+		switch {
+		case !hh.Unlimited && hh.RemainingSeconds <= 0:
+			hhState = 4
+		case hh.Started:
+			hhState = 3
+		default:
+			hhState = 1
+		}
+	}
 	return wiregen.MakeObj("ghfbofgdflm", map[int]*proto.Value{
 		0:  proto.U32(uint32(p.UID)),
 		1:  proto.StrVal(p.Name),
@@ -245,7 +272,7 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 		// 在库表矛盾（bncmdhbgahe=600）——判定为当时误读，2026-11-06
 		// 审查复核后定案保留 181（改动前需官方 307 实抓佐证）。
 		23: proto.Args(proto.S("181"), vouchers...),
-		24: build745(),
+		24: build745(hhState, hhMinutes),
 		25: season,
 	})
 }

@@ -22,6 +22,7 @@ type catchReceipt struct {
 	SkillID                                          int64
 	CaughtAt                                         float64
 	DroppedCardGUID                                  string `json:",omitempty"`
+	DroppedGiftBagGUID                               string `json:",omitempty"`
 }
 
 func (r catchReceipt) result(replayed bool) *settleXpResult {
@@ -31,7 +32,8 @@ func (r catchReceipt) result(replayed bool) *settleXpResult {
 	}
 	return &settleXpResult{baseXP: r.BaseXP, totalXP: r.TotalXP, premiumXP: r.PremiumXP, bonuses: r.Bonuses, skillGain: gain, silver: r.Silver,
 		prevBest: r.PreviousBest, newLevel: r.Level, totalXp: r.AccumulatedXP,
-		levelsGained: r.LevelsGained, isRecord: r.IsRecord, skillID: r.SkillID, replayed: replayed, droppedCardGUID: r.DroppedCardGUID}
+		levelsGained: r.LevelsGained, isRecord: r.IsRecord, skillID: r.SkillID, replayed: replayed, droppedCardGUID: r.DroppedCardGUID,
+		droppedGiftBagGUID: r.DroppedGiftBagGUID}
 }
 
 type catchWear struct {
@@ -156,10 +158,15 @@ func (s *Server) settleCatchOnce(ctx context.Context, uid int64, f *RolledFish, 
 	if sess := s.liveSessionByUID(uid); sess != nil {
 		sess.updateHappyHour(time.Now(), false)
 	}
-	if happy {
-		bonuses = append(bonuses, catchXPBonus{Kind: 56, GUID: zeroGUID, Multiplier: .5, XP: int64(math.Round(float64(xp) * .5))})
+	// 福袋载体鱼只发袋子不掉交易卡；普通鱼照旧。
+	var card *store.Item
+	if f.GiftBagID == "" {
+		card, err = s.prepareCatchCard(ctx, uid, f, bait)
+		if err != nil {
+			return nil, err
+		}
 	}
-	card, err := s.prepareCatchCard(ctx, uid, f, bait)
+	bag, err := s.prepareCatchGiftBag(ctx, uid, f)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +202,16 @@ func (s *Server) settleCatchOnce(ctx context.Context, uid int64, f *RolledFish, 
 		return nil, err
 	} else if bonus != nil {
 		bonuses = append(bonuses, *bonus)
+	}
+	if happy {
+		// Kind 57 = ExpHappyHour：金色圆圈 +「欢乐时光」。
+		// 基数是排在前面的全部经验：点数经验 + 渔具经验 + 酒类加成 + 会员「高级」，
+		// 欢乐时光本身按 100% × 该合计结算。
+		hhXP := xp + premiumXP
+		for _, bonus := range bonuses {
+			hhXP += bonus.XP
+		}
+		bonuses = append(bonuses, catchXPBonus{Kind: 57, GUID: zeroGUID, Multiplier: 1, XP: hhXP})
 	}
 	for _, bonus := range bonuses {
 		if bonus.XP > math.MaxInt64-totalXP {
@@ -263,6 +280,12 @@ func (s *Server) settleCatchOnce(ctx context.Context, uid int64, f *RolledFish, 
 			return nil, err
 		}
 		r.DroppedCardGUID = card.GUID
+	}
+	if bag != nil {
+		if err := insertItemTx(ctx, tx, bag); err != nil {
+			return nil, err
+		}
+		r.DroppedGiftBagGUID = bag.GUID
 	}
 	raw, err := json.Marshal(r)
 	if err != nil {

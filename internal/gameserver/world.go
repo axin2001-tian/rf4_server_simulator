@@ -58,6 +58,13 @@ func registerWorldHandlers(d *Dispatch) {
 	d.Register(4, 6, hItemMove)
 	d.Register(4, 7, hItemRemove)
 	d.Register(4, 8, hItemUse)
+	// 4/8 有两种合法响应：普通物品使用回 800 快照；福袋回 806（ldkingipcpa，
+	// 客户端据此弹“找到物品”对话框）。command_contract 只登记了 800，
+	// 需显式放行 806，否则响应会被契约守卫拒发，客户端一直转圈。
+	d.RegisterResponseContract(4, 8, ResponseContractRule{
+		Kind:    proto.KindObj,
+		TypeIDs: []uint32{800, 806},
+	})
 	d.Register(3, 37, hPlaceBuyoutTx)
 	d.Register(3, 38, hPlaceTripTx)
 	d.Register(3, 33, hBuyHouseTx)
@@ -213,6 +220,9 @@ func hItemUse(ctx *Ctx) ([]byte, bool) {
 		return body, true
 	}
 	if body, handled := srv.useSkillBook(ctx); handled {
+		return body, true
+	}
+	if body, handled := srv.useGiftBag(ctx); handled {
 		return body, true
 	}
 	guids := deepGUIDs(ctx.Tree)

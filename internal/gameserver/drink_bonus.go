@@ -48,7 +48,16 @@ func (s *Server) drinkXPBonusTx(ctx context.Context, tx *sql.Tx, uid, baseXP int
 	}
 	var best catchXPBonus
 	for _, state := range states {
-		rate := drinkRate(state.Category, time.Duration(state.RemainingMillis)*time.Millisecond)
+		duration := time.Duration(state.DurationMillis) * time.Millisecond
+		remaining := time.Duration(state.RemainingMillis) * time.Millisecond
+		// 酒类加成按商店售价折算：喝的酒越贵，经验加成越高。
+		peak := 0.0
+		if silver, gold := drinkPriceTx(ctx, tx, state.SourceGUID); silver > 0 || gold > 0 {
+			peak = drinkPeakByPrice(silver, gold)
+		} else if rule, ok := drinkRuleForCategory(state.Category); ok {
+			peak = rule.Peak
+		}
+		rate := drinkRateForPeak(peak, duration, remaining)
 		if rate > best.Multiplier {
 			guid := state.SourceGUID
 			if guid == "" {
@@ -62,6 +71,20 @@ func (s *Server) drinkXPBonusTx(ctx context.Context, tx *sql.Tx, uid, baseXP int
 		return nil, nil
 	}
 	return &best, nil
+}
+
+// drinkPriceTx 读取那瓶酒在商店里的售价（银币、金币）。
+func drinkPriceTx(ctx context.Context, tx *sql.Tx, guid string) (int64, int64) {
+	if tx == nil || guid == "" || guid == zeroGUID {
+		return 0, 0
+	}
+	var silver, gold sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT p.silver, p.gold FROM item i
+		LEFT JOIN item_price p ON p.item_id=i.item_id WHERE i.guid=?`, guid).Scan(&silver, &gold)
+	if err != nil {
+		return 0, 0
+	}
+	return silver.Int64, gold.Int64
 }
 
 func (s *Server) runDrinkUseReceiptCleanup(stop <-chan struct{}, done chan<- struct{}) {

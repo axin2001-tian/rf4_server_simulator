@@ -6,7 +6,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"rf4server/internal/store"
 )
+
+func grantHappyHourTestProfile(t *testing.T, db *store.DB, uid int64) {
+	t.Helper()
+	if _, err := db.SQL.Exec(`INSERT INTO profile(uid,name,happy_hour,happy_hour_exp) VALUES(?,'player',?,0)
+		ON CONFLICT(uid) DO UPDATE SET happy_hour=2,happy_hour_exp=0`, uid, store.HappyHourUnlimited); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func registerHappyHourTestSession(t *testing.T, s *Server, sid uint64) *Session {
 	t.Helper()
@@ -127,6 +137,7 @@ func TestHappyHourValidFishingPendingAndCloseFence(t *testing.T) {
 	s, db := newRigTestServer(t)
 	ctx := context.Background()
 	const uid = int64(1000001)
+	grantHappyHourTestProfile(t, db, uid)
 	rod := baitTestRod(t, s)
 	sess := registerHappyHourTestSession(t, s, 828)
 	st := s.fishingState(uid)
@@ -164,6 +175,7 @@ func TestHappyHourValidFishingPendingAndCloseFence(t *testing.T) {
 func TestHappyHourBiteQualificationPersistsBeforeFailedPush(t *testing.T) {
 	s, db := newRigTestServer(t)
 	const uid = int64(1000001)
+	grantHappyHourTestProfile(t, db, uid)
 	rod := baitTestRod(t, s)
 	baitTestMount(t, s, rod, "worm_01", 2, 350)
 	sess := registerHappyHourTestSession(t, s, 829)

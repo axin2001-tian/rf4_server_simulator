@@ -34,25 +34,45 @@ func (s *Server) rodXPBonuses(ctx context.Context, uid int64, rodGUID string, ba
 	}
 	entries, _ := defAttrs(def)["dmcgapifbdm"].([]any)
 	var bonuses []catchXPBonus
+	skillRate := 0.0
 	for _, raw := range entries {
 		b, ok := raw.(map[string]any)
-		if !ok || b["fopbhlmkcpe"] != float64(9) {
+		if !ok {
 			continue
 		}
-		kind, ok := b["liampcgfchp"].(float64)
-		if !ok || kind < 1 || kind > 3 || kind != math.Trunc(kind) {
-			continue
+		switch b["fopbhlmkcpe"] {
+		case float64(9):
+			kind, ok := b["liampcgfchp"].(float64)
+			if !ok || kind < 1 || kind > 3 || kind != math.Trunc(kind) {
+				continue
+			}
+			rate, ok := decodeU32F32(b["kdhkgjcjpel"])
+			if !ok || rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+				return nil, fmt.Errorf("鱼竿经验加成无效")
+			}
+			amount := math.Round(float64(baseXP) * rate)
+			if amount >= float64(math.MaxInt64) {
+				return nil, fmt.Errorf("鱼竿经验加成超出范围")
+			}
+			if amount > 0 {
+				bonuses = append(bonuses, catchXPBonus{Kind: uint32(kind), GUID: row.GUID, Multiplier: rate, XP: int64(amount)})
+			}
+		case float64(3):
+			// 鱼竿的「技能」奖金（如 +10% 技能「水底钓鱼」）也按同百分比计入渔具经验。
+			pct, ok := decodeU32F32(b["oalocpjcokm"])
+			if !ok || pct <= 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
+				continue
+			}
+			skillRate += pct / 100
 		}
-		rate, ok := decodeU32F32(b["kdhkgjcjpel"])
-		if !ok || rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
-			return nil, fmt.Errorf("鱼竿经验加成无效")
-		}
-		amount := math.Round(float64(baseXP) * rate)
+	}
+	if skillRate > 0 {
+		amount := math.Round(float64(baseXP) * skillRate)
 		if amount >= float64(math.MaxInt64) {
 			return nil, fmt.Errorf("鱼竿经验加成超出范围")
 		}
 		if amount > 0 {
-			bonuses = append(bonuses, catchXPBonus{Kind: uint32(kind), GUID: row.GUID, Multiplier: rate, XP: int64(amount)})
+			bonuses = append(bonuses, catchXPBonus{Kind: 2, GUID: row.GUID, Multiplier: skillRate, XP: int64(amount)})
 		}
 	}
 	return bonuses, nil

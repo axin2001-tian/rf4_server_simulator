@@ -33,9 +33,12 @@ type FishState struct {
 	PosX        float64
 	PosZ        float64
 	HasPos      bool
-	CastPosX    float64
-	CastPosZ    float64
-	HasCastPos  bool
+	// TeleportUntil 是管理后台坐标传送的保护截止 unix。在此之前客户端 3/9
+	// 上报不会覆盖传送坐标；到期后恢复以客户端上报为准。
+	TeleportUntil int64
+	CastPosX      float64
+	CastPosZ      float64
+	HasCastPos    bool
 	// BoatUntil 是船票租用有效的截止 unix，3/7 验票上船时写入。0 表示本次会话
 	// 还没有上船证据，判鱼对“已上船”条件保持中性。
 	BoatUntil int64
@@ -244,18 +247,19 @@ type RolledFish struct {
 	BaitGUIDs      string
 	BaitsKnown     bool
 
-	FishGUID string
-	Species  string
-	Grade    int64
-	WeightG  int64
-	LengthM  float64
-	XP       int64
-	Silver   int64
-	LocLevel string
-	Stamina  float64 // obj27#05 搏鱼体力池；0=按体重和已验证兜底比例计算
-	Force    float64 // obj27#08 拉力；0=按体重和已验证比例计算
-	NamedID  string  // 被命名鱼
-	Name     string
+	FishGUID  string
+	Species   string
+	Grade     int64
+	WeightG   int64
+	LengthM   float64
+	XP        int64
+	Silver    int64
+	LocLevel  string
+	Stamina   float64 // obj27#05 搏鱼体力池；0=按体重和已验证兜底比例计算
+	Force     float64 // obj27#08 拉力；0=按体重和已验证比例计算
+	NamedID   string  // 被命名鱼
+	Name      string
+	GiftBagID string // 咬钩时抽中的福袋物品ID（空=这尾鱼不带福袋）
 }
 
 // stateFor 按 uid 取/建状态。
@@ -506,6 +510,37 @@ func (s *Server) tunableF(key string, def float64) float64 {
 func jsonFloat(s string, out *float64) error {
 	_, err := fmt.Sscanf(strings.TrimSpace(s), "%g", out)
 	return err
+}
+
+// tunableStr 字符串运行参数读取（tunables 表优先，缓存 30s；空值回退默认）。
+func (s *Server) tunableStr(key string, def string) string {
+	s.tunMu.Lock()
+	defer s.tunMu.Unlock()
+	if s.tunStrCache == nil || time.Since(s.tunStrAt) > 30*time.Second {
+		m := map[string]string{}
+		if s.DB != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			rows, err := s.DB.SQL.QueryContext(ctx, `SELECT key, value FROM tunables`)
+			if err == nil {
+				for rows.Next() {
+					var k, v string
+					if rows.Scan(&k, &v) == nil {
+						m[k] = v
+					}
+				}
+				rows.Close()
+			}
+			cancel()
+		}
+		s.tunStrCache = m
+		s.tunStrAt = time.Now()
+	}
+	if v, ok := s.tunStrCache[key]; ok {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return def
 }
 
 // ---- 判鱼 ----
@@ -1709,7 +1744,10 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 		return
 	}
 	x, z, hasPos := st.CastPosX, st.CastPosZ, st.HasCastPos
-	if !hasPos {
+	if now.Unix() < st.TeleportUntil {
+		// 管理后台坐标传送保护期内，判鱼坐标以传送点为准。
+		x, z, hasPos = st.PosX, st.PosZ, st.HasPos
+	} else if !hasPos {
 		x, z, hasPos = st.PosX, st.PosZ, st.HasPos
 	}
 	probability := s.biteProbabilityForLoc(st.Loc)
@@ -1748,6 +1786,20 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 	}
 	f.HappyHour, f.HappyHourKnown = sess.currentHappyHour().Active, true
 	f.LocLevel = s.currentLevel(uid)
+	if bagID := s.rollGiftBagBite(s.dbCtx(), uid); bagID != "" {
+		// 福袋咬钩：这尾鱼是福袋载体——搏鱼与结算都按极小值处理
+		// （Grade=0、几十克），结算只发福袋、不掉交易卡。配置了
+		// gift_bag_bite_species 时用指定鱼种的外观承载。
+		f.GiftBagID = bagID
+		f.Grade = 0
+		f.WeightG = 20 + int64(rand.Intn(81))
+		f.LengthM = 0.2
+		f.NamedID, f.Name = "", ""
+		if sp := s.tunableStr(store.GiftBagBiteSpeciesKey, ""); sp != "" {
+			f.Species = sp
+		}
+		s.log.Info("福袋咬钩", "uid", uid, "bag", bagID, "rod", shortGUID(st.GearGuid))
+	}
 	st.Pending = f
 	st.PendingRepush = 0
 	gear, generation := st.GearGuid, st.castGeneration
@@ -1937,31 +1989,35 @@ func fishAnnouncementKind(grade int64) int {
 	return 0
 }
 
+// fishLandedKV 构造上鱼播报的 401.f4 参数：键1 为中文鱼名，键2 为重量（克，
+// 客户端按克/公斤显示）。三档都只发鱼名，前缀由客户端模板加：k25 蓝冠
+// “超级稀有鱼{0},{1}”（深橘红）、k26 奖杯“稀有鱼 {0} ， {1}”（橘黄）、
+// kind3 达标无前缀（蓝色）。
+func (s *Server) fishLandedKV(f *RolledFish, kind int) *proto.Value {
+	name := s.speciesZhName(s.dbCtx(), f.Species)
+	if name == "" {
+		name = f.Species
+	}
+	return fishTVKv(name, f.WeightG)
+}
+
 // notifyFishLanded 播报达标、奖杯和蓝冠；普通鱼由结算卡展示。
 func (s *Server) notifyFishLanded(sess *Session, f *RolledFish, newRecord bool) {
 	if sess == nil || f == nil {
 		return
 	}
-	// 官方模板参数：键1=鱼种key（客户端本地化），键2=重量克（/1000 千克）。
-	// fish_tv_kv 默认 0：KV 推送曾在客户端触发解析异常断连（回登录界面），
-	// 编码经面板 kv_shape=30 探测确认后置 1 启用。
-	var kv *proto.Value
-	if s.tunableF("fish_tv_kv", 0) != 0 {
-		kv = fishTVKv(f.Species, f.WeightG)
-	}
 	// k25/k26/k03 是带参数的官方模板播报，依赖 401.f4 模板参数；KV 未启用
-	// （kv==nil）时客户端解析模板缺参会抛异常断连（回登录界面）。此时退化
-	// 为已验证的普通系统文本播报，保留提示且不掉线。
-	if kv == nil {
-		if text := s.fishLandedText(f, newRecord); text != "" {
-			sess.pushSystemChat(text)
-		}
-	} else if kind := fishAnnouncementKind(f.Grade); kind != 0 {
-		// 25=稀有奖杯（蓝冠，kDlg_Chat_EventFishCaughtRareTrophy）、
-		// 26=奖杯（kDlg_Chat_EventFishCaughtTrophy）、3=达标（玩家，鱼名 X 千克）。
-		sess.pushChatProbe(27, kind, "", kv)
+	// （fish_tv_kv=0）时客户端解析模板缺参会抛异常断连（回登录界面）。此时
+	// 退化为已验证的普通系统文本播报，保留提示且不掉线。
+	kind := fishAnnouncementKind(f.Grade)
+	if kind != 0 && s.tunableF("fish_tv_kv", 0) != 0 {
+		// 25=蓝冠（深橘红）、26=奖杯（橘黄）、3=达标（蓝色）；颜色来自模板。
+		sess.pushChatProbe(27, kind, "", s.fishLandedKV(f, kind))
+		return
 	}
-
+	if text := s.fishLandedText(f, newRecord); text != "" {
+		sess.pushSystemChat(text)
+	}
 }
 
 // notifyFishKept 入护播报已永久停用：结算卡已经展示入护结果，

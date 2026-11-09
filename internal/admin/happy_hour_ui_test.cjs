@@ -46,7 +46,7 @@ test('happy hour switch and remaining time fit supported sizes and long text',as
     assert.ok(switchSize.scroll<=width+1&&switchSize.messageScroll<=switchSize.messageWidth+1&&!switchSize.overlap,JSON.stringify({width,dpi,scenario,switchSize}));
     await page.evaluate(()=>location.hash='players');await page.locator('#view-players').waitFor({state:'visible'});
     await page.evaluate(({active,remaining})=>{
-     PLAYER={uid:1,name:'测试玩家',level:25,xp:0,item_count:0,keepnet_count:0,mail_count:0,membership:0,skills:[],happy_hour:{enabled:true,active,remaining_seconds:remaining}};
+     PLAYER={uid:1,name:'测试玩家',level:25,xp:0,item_count:0,keepnet_count:0,mail_count:0,membership:0,skills:[],happy_hour:{enabled:true,qualified:true,unlimited:false,expires_at:0,active,remaining_seconds:remaining}};
      PLAYER_TAB='profile';renderPlayerDetail();
     },{active,remaining});
     const clock=page.locator('#playerHappyHour');assert.match(await clock.textContent(),new RegExp(label));assert.match(await clock.textContent(),new RegExp('今日剩余 '+Math.ceil(remaining/60)+' 分钟'));
@@ -59,7 +59,7 @@ test('happy hour switch and remaining time fit supported sizes and long text',as
     for(const t of clockSize.texts)assert.ok(t.x>=clockSize.box.x-1&&t.right<=clockSize.box.right+1&&t.y>=clockSize.box.y-1&&t.bottom<=clockSize.box.bottom+1);
     measurements.push({width,dpi,scenario,...switchSize,happyWidth:clockSize.width,happyHeight:clockSize.height,happyFont:clockSize.font});
    }
-   await page.evaluate(()=>{PLAYER.happy_hour={enabled:false,active:false,remaining_seconds:1800};renderPlayerDetail()});
+   await page.evaluate(()=>{PLAYER.happy_hour={enabled:false,qualified:true,unlimited:false,expires_at:0,active:false,remaining_seconds:1800};renderPlayerDetail()});
    assert.match(await page.locator('#playerHappyHour').textContent(),/已关闭.*今日剩余 30 分钟/);
    assert.deepEqual(errors,[]);await context.close();
   }

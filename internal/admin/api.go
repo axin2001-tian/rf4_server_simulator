@@ -79,13 +79,17 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("GET /api/players/records", auth(s.handlePlayerRecords))
 	mux.HandleFunc("POST /api/players/records", auth(s.handlePlayerRecordsSave))
 	mux.HandleFunc("POST /api/players/membership", auth(s.handlePlayerMembership))
+	mux.HandleFunc("POST /api/players/happyhour", auth(s.handlePlayerHappyHour))
 	mux.HandleFunc("POST /api/players/grant", auth(s.handleGrantItem))
+	mux.HandleFunc("GET /api/players/giftbag", auth(s.handlePlayerGiftBag))
+	mux.HandleFunc("POST /api/players/giftbag/pool", auth(s.handleGiftBagPoolSave))
 	mux.HandleFunc("POST /api/players/items/delete", auth(s.handlePlayerItemDelete))
 	mux.HandleFunc("POST /api/players/keepnet/add", auth(s.handlePlayerKeepnetAdd))
 	mux.HandleFunc("POST /api/players/keepnet/delete", auth(s.handlePlayerKeepnetDelete))
 	mux.HandleFunc("POST /api/players/skills/update", auth(s.handlePlayerSkillUpdate))
 	mux.HandleFunc("POST /api/players/skills/points", auth(s.handlePlayerSkillPoints))
 	mux.HandleFunc("POST /api/players/kick", auth(s.handleKick))
+	mux.HandleFunc("POST /api/players/teleport", auth(s.handleTeleport))
 	mux.HandleFunc("POST /api/players/ban", auth(s.handleBan))
 	mux.HandleFunc("GET /api/catalog/items", auth(s.handleCatalogItems))
 	mux.HandleFunc("GET /api/stores", auth(s.handleStores))
@@ -283,9 +287,31 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "参数错误")
 		return
 	}
-	if (req.Key == "fish_ecology_enabled" || req.Key == "fish_bait_rules_enabled" || req.Key == "fish_distribution_enabled" || req.Key == "fish_weather_enabled" || req.Key == "happy_hour_enabled") && req.Value != "0" && req.Value != "1" {
-		httpError(w, 400, "鱼群开关只能为 0 或 1")
-		return
+	switch req.Key {
+	case "fish_ecology_enabled", "fish_bait_rules_enabled", "fish_distribution_enabled",
+		"fish_weather_enabled", "happy_hour_enabled", store.GiftBagDropEnabledKey:
+		if req.Value != "0" && req.Value != "1" {
+			httpError(w, 400, "开关只能为 0 或 1")
+			return
+		}
+	case store.GiftBagDropChanceKey:
+		f, err := strconv.ParseFloat(strings.TrimSpace(req.Value), 64)
+		if err != nil || f < 0 || f > 1 {
+			httpError(w, 400, "掉落概率需在 0 ~ 1 之间")
+			return
+		}
+	case store.GiftBagDropYearsKey:
+		n, err := strconv.ParseInt(strings.TrimSpace(req.Value), 10, 64)
+		if err != nil || n < 0 || n > store.GiftBagAllYears {
+			httpError(w, 400, "年份掩码需在 0 ~ 31 之间")
+			return
+		}
+	case store.GiftBagDropDailyKey:
+		n, err := strconv.ParseInt(strings.TrimSpace(req.Value), 10, 64)
+		if err != nil || n < 0 {
+			httpError(w, 400, "每日上限不能为负")
+			return
+		}
 	}
 	if err := s.db.TunableSet(r.Context(), req.Key, req.Value, adminOf(r)); err != nil {
 		httpError(w, 500, err.Error())
@@ -514,6 +540,28 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "kick", "uid": req.UID}))
 	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "kick", strconv.FormatInt(req.UID, 10), "")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleTeleport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UID     int64   `json:"uid"`
+		X       float64 `json:"x"`
+		Z       float64 `json:"z"`
+		Loc     string  `json:"loc"`
+		Spot    uint64  `json:"spot"`
+		HoldSec int64   `json:"hold_sec"`
+	}
+	if err := readJSON(r, &req); err != nil || req.UID == 0 {
+		httpError(w, 400, "参数错误")
+		return
+	}
+	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{
+		"op": "teleport", "uid": req.UID, "x": req.X, "z": req.Z,
+		"loc": strings.TrimSpace(req.Loc), "spot": req.Spot, "hold_sec": req.HoldSec,
+	}))
+	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "teleport", strconv.FormatInt(req.UID, 10),
+		fmt.Sprintf("x=%.2f z=%.2f loc=%s spot=%d hold=%ds", req.X, req.Z, req.Loc, req.Spot, req.HoldSec))
 	writeJSON(w, map[string]any{"ok": true})
 }
 

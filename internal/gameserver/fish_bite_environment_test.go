@@ -193,6 +193,26 @@ func TestFishMotionConditionWeightRecognizesJigDriftAndBoat(t *testing.T) {
 	}
 }
 
+func TestLevelKeyForLocResolvesSceneIDs(t *testing.T) {
+	cases := map[string]string{
+		"loc1_02":             "level_001_lake",
+		"lvl2_01":             "level_002_kirzah_river",
+		"loc12_15":            "level_012_north_sea",
+		"loc19_03":            "level_019_american_pond",
+		"level_012_north_sea": "level_012_north_sea",
+		"bogus":               spawnLevelKey,
+	}
+	for loc, want := range cases {
+		if got := levelKeyForLoc(loc); got != want {
+			t.Fatalf("levelKeyForLoc(%q)=%q，期望 %q", loc, got, want)
+		}
+	}
+	// 海图条件按地图 key 判定；场景名能被折算后，挪威海才算"有海图"。
+	if !sonarChartLevel(levelKeyForLoc("loc12_15")) {
+		t.Fatal("loc12_15 未识别为有声呐海图的地图")
+	}
+}
+
 func TestLureAttributesUseConfirmedTypeAndDerivedFields(t *testing.T) {
 	srv, db := newRigTestServer(t)
 	staticPath := filepath.Join("..", "..", "server_data", "static.sqlite3")

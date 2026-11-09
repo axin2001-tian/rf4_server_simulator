@@ -63,9 +63,11 @@ type Server struct {
 	fishEcologyCacheLoaded bool
 
 	// 运行参数缓存
-	tunMu    sync.Mutex
-	tunCache map[string]float64
-	tunAt    time.Time
+	tunMu       sync.Mutex
+	tunCache    map[string]float64
+	tunAt       time.Time
+	tunStrCache map[string]string
+	tunStrAt    time.Time
 
 	// 搏鱼曲线池
 	curves  map[string][][19]float64

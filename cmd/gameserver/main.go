@@ -85,6 +85,15 @@ func main() {
 		log.Info("渔线轮物理参数已同步", "reels", n)
 	}
 
+	// 面板买酒：客户端商店不渲染新增品类，酒类改由传送面板直接下单。
+	stopLocalAPI, err := srv.StartLocalAPI("127.0.0.1:9345")
+	if err != nil {
+		log.Warn("面板本地接口启动失败", "err", err)
+	} else {
+		defer stopLocalAPI()
+		log.Info("面板本地接口已就绪", "addr", "127.0.0.1:9345")
+	}
+
 	ln, err := net.Listen("tcp", cfg.Game.Tunnel.Addr)
 	if err != nil {
 		log.Error("隧道监听失败", "addr", cfg.Game.Tunnel.Addr, "err", err)

@@ -117,6 +117,11 @@ var categoryWireClass = map[int64]wireClassEntry{
 	70: {"lligmmmgllg", 12703}, // case 68 ddhcineacka
 	71: {"focdogajjcc", 13001}, // case 69 lcadlijehco
 	72: {"enikeammfen", 2015},  // case 70 iidloljandl
+	// 73: 礼物袋（新年福袋）。客户端分发表（case=cat-2）里没有 case 71，
+	// 说明这一类别没有独立的实例 DTO；袋子在背包里只承担“可领取的礼包”
+	// 语义，因此按礼包 DTO niodmhfbkag / coacllgmnml 发送，图标与名称仍由
+	// item_def 的数字 id 决定。若实测背包渲染异常，优先怀疑这里。
+	73: {"coacllgmnml", 3100},
 	76: {"fdnngkgnmon", 13041}, // case 74 ghikepgmojg
 	78: {"dapkdcghfmg", 11301}, // case 76 ipdpoaiekem
 	82: {"ckfmndabaei", 11304}, // imdcjllgdcn 卡册

@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+func grantTestHappyHour(t *testing.T, db *DB, uid int64) {
+	t.Helper()
+	if _, err := db.SQL.Exec(`INSERT INTO profile(uid,name,happy_hour,happy_hour_exp) VALUES(?,'player',?,0)
+		ON CONFLICT(uid) DO UPDATE SET happy_hour=2,happy_hour_exp=0`, uid, HappyHourUnlimited); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHappyHourOnlineTimePauseRestartAndReset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "happy.db")
 	db, err := Open(path)
@@ -20,6 +28,7 @@ func TestHappyHourOnlineTimePauseRestartAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	grantTestHappyHour(t, db, 101)
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, happyHourZone)
 	advance := func(owner string, at time.Time, fishing, takeover bool) HappyHourStatus {
 		t.Helper()
@@ -79,6 +88,7 @@ func TestHappyHourConcurrentSessionCannotStealBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, now := context.Background(), time.Now()
+	grantTestHappyHour(t, db, 10)
 	if _, err := db.AdvanceHappyHour(ctx, 10, "first", now, true, true, 30*time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +112,7 @@ func TestHappyHourShanghaiMidnightAndDisable(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	grantTestHappyHour(t, db, 1)
 	now := time.Date(2026, 11, 4, 23, 59, 50, 0, happyHourZone)
 	if _, err := db.AdvanceHappyHour(ctx, 1, "a", now, true, true, 0); err != nil {
 		t.Fatal(err)
@@ -123,6 +134,43 @@ func TestHappyHourShanghaiMidnightAndDisable(t *testing.T) {
 	r, err = db.AdvanceHappyHour(ctx, 1, "b", now.Add(2*time.Hour), true, true, 0)
 	if err != nil || !r.Active || r.RemainingSeconds != 3580 {
 		t.Fatalf("resumed %+v %v", r, err)
+	}
+}
+
+func TestHappyHourRequiresValidSubscription(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "subscription.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, happyHourZone)
+	if r, err := db.AdvanceHappyHour(ctx, 55, "a", now, true, true, 0); err != nil || r.Qualified || r.Active {
+		t.Fatalf("未发放资格仍然生效 %+v %v", r, err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO profile(uid,name,happy_hour,happy_hour_exp) VALUES(55,'p',?,?)`,
+		HappyHourLimited, now.AddDate(0, 0, 30).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := db.AdvanceHappyHour(ctx, 55, "a", now, true, true, 0); err != nil || !r.Qualified || r.Unlimited || !r.Active {
+		t.Fatalf("限时资格未生效 %+v %v", r, err)
+	}
+	if r, err := db.AdvanceHappyHour(ctx, 55, "a", now.AddDate(0, 0, 31), true, true, 0); err != nil || r.Qualified || r.Active {
+		t.Fatalf("过期资格仍然生效 %+v %v", r, err)
+	}
+	if err := db.SetHappyHourSubscription(ctx, 55, HappyHourUnlimited, 0, "test", now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	r, err := db.GetHappyHourStatus(ctx, 55, now)
+	if err != nil || !r.Qualified || !r.Unlimited || r.RemainingSeconds != 3600 {
+		t.Fatalf("管理员发放后未重置 %+v %v", r, err)
+	}
+	// 客户端把欢乐时光当高级会员权益：发放资格必须同时置会员，否则主页一直显示"需要高级会员"
+	if p, err := db.GetProfile(ctx, 55); err != nil || p.Membership != 2 || p.MembershipExp != 0 {
+		t.Fatalf("无限制资格未同步会员 %+v %v", p, err)
 	}
 }
 
@@ -164,6 +212,7 @@ func TestHappyHourConcurrentOwnersConsumeOneBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
+	grantTestHappyHour(t, db, 18)
 	var wg sync.WaitGroup
 	var active atomic.Int64
 	failures := make(chan error, 12)

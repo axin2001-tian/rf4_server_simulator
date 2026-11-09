@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -478,6 +480,67 @@ func validLevelKey(key string) bool {
 	}
 	_, ok := maps[key]
 	return ok
+}
+
+// levelKeyForLoc 把客户端水域/场景名（loc12_15、lvl2_01）折算成世界地图 key。
+// 判鱼的海图条件与声呐区号都按地图 key 查询，直接拿场景名会永远匹配不到。
+func levelKeyForLoc(loc string) string {
+	if validLevelKey(loc) {
+		return loc
+	}
+	if n, ok := sceneMapNumber(loc); ok {
+		if key := levelKeyForNumber(n); key != "" {
+			return key
+		}
+	}
+	return spawnLevelKey
+}
+
+// sceneMapNumber 取场景名 "_" 前第一段数字：loc12_15 -> 12，lvl2_01 -> 2。
+func sceneMapNumber(loc string) (int, bool) {
+	underscore := strings.IndexByte(loc, '_')
+	if underscore <= 0 {
+		return 0, false
+	}
+	seg := loc[:underscore]
+	start := -1
+	for i := 0; i < len(seg); i++ {
+		if seg[i] >= '0' && seg[i] <= '9' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	end := start
+	for end < len(seg) && seg[end] >= '0' && seg[end] <= '9' {
+		end++
+	}
+	n, err := strconv.Atoi(seg[start:end])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// levelKeyForNumber 按地图编号查世界地图 key（level_012_*）；有歧义时不猜。
+func levelKeyForNumber(n int) string {
+	maps, err := loadMapDefs()
+	if err != nil {
+		return ""
+	}
+	prefix := fmt.Sprintf("level_%03d_", n)
+	found := ""
+	for key := range maps {
+		if strings.HasPrefix(key, prefix) {
+			if found != "" {
+				return ""
+			}
+			found = key
+		}
+	}
+	return found
 }
 
 // sceneForLevel 返回地图对应的已知场景名；未登记地图返回空字符串。

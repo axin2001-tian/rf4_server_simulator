@@ -704,6 +704,11 @@ type AdminCommand struct {
 	Channel      int64               `json:"channel,omitempty"`  // fish_tv_test：聊天推送通道 24..31
 	Kind         int64               `json:"kind,omitempty"`     // fish_tv_test：401.f0 消息类型；负值为参数位探测
 	KVShape      int64               `json:"kv_shape,omitempty"` // fish_tv_test：401.f4 模板 KV 形状或外层参数探测编号
+	X            float64             `json:"x,omitempty"`        // teleport：世界坐标 X
+	Z            float64             `json:"z,omitempty"`        // teleport：世界坐标 Z
+	Loc          string              `json:"loc,omitempty"`      // teleport：可选场景 loc
+	Spot         uint64              `json:"spot,omitempty"`     // teleport：可选钓点序号
+	HoldSec      int64               `json:"hold_sec,omitempty"` // teleport：坐标保护秒数，默认 600
 }
 
 // StartAdminSubscriber 轮询共享 SQLite 队列，每 2 秒处理一批管理指令。
@@ -747,6 +752,28 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 			sess.Close("admin_kick")
 			s.log.Info("管理指令：踢下线", "uid", cmd.UID)
 		}
+	case "teleport":
+		// 服务端坐标传送：改写判鱼用的玩家坐标，并在保护期内忽略 3/9 覆盖。
+		// 客户端画面不动，鱼种分布/水体判定按新坐标生效。
+		hold := cmd.HoldSec
+		if hold <= 0 {
+			hold = 600
+		}
+		until := time.Now().Unix() + hold
+		for _, st := range s.fishingStatesFor(cmd.UID) {
+			st.mu.Lock()
+			st.PosX, st.PosZ, st.HasPos = cmd.X, cmd.Z, true
+			if cmd.Loc != "" {
+				st.Loc = cmd.Loc
+			}
+			if cmd.Spot > 0 {
+				st.Spot = cmd.Spot
+			}
+			st.TeleportUntil = until
+			st.mu.Unlock()
+		}
+		s.log.Info("管理指令：坐标传送", "uid", cmd.UID, "x", cmd.X, "z", cmd.Z,
+			"loc", cmd.Loc, "spot", cmd.Spot, "hold_sec", hold)
 	case "grant_item":
 		row, _, err := s.AddToStack(ctx, cmd.UID, cmd.ItemID, "backpack", cmd.Qty)
 		if err != nil {
@@ -857,7 +884,8 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 		s.log.Info("管理指令：广播（占位）", "text", cmd.Text)
 	case "reload_tunables":
 		s.tunMu.Lock()
-		s.tunCache = nil // 强制下次读取刷新
+		s.tunCache = nil    // 强制下次读取刷新
+		s.tunStrCache = nil // 字符串参数同样失效
 		s.tunMu.Unlock()
 		if err := s.reloadFishEcologyCache(s.dbCtx()); err != nil {
 			s.log.Warn("鱼种生态缓存刷新失败", "err", err)

@@ -1,0 +1,192 @@
+﻿From 07ede5ea4638e5891f1117f24f62ad47057b9689 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Fri, 6 Nov 2026 21:33:15 +0800
+Subject: [PATCH] =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E9=B1=BC=E6=B1=9B=20KV=20?=
+ =?UTF-8?q?=E5=AE=B9=E5=99=A8=E7=BC=96=E7=A0=81=E8=B8=A2=E7=BA=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+401.f4 的 KV 数组此前用 KindKVList 编码，元素被套上对象头且容器类型名
+写成 "dejdolfnooh"，客户端 OpenTypeResolver 查不到该类型名，整条流错位
+后抛异常把客户端踢回登录界面。
+
+- 类型名改用 wiregen typeid 400 的十进制字符串 "135"（客户端 string→Type
+  字典键与 njhhjeijlim attribute 序号同体系），元素带 typed 对象头
+  [0x01][u32le 400]
+- 新增 proto.KindRaw 原始字节直通，fishTVKv 按实测报文逐字节构造
+- 面板 kv_shape=30 直接返回生产 fishTVKv，保证探测字节与生产一致
+- 新增回归测试 TestFishTVShape30MatchesProduction
+- 客户端版本 4.0.25034，真机长期验证可渲染且连接稳定
+---
+ internal/gameserver/fish_tv_kv_test.go | 35 +++++++++++++++++
+ internal/gameserver/misc_fix.go        | 53 ++++++++++++++++++++++----
+ internal/proto/encode.go               |  4 ++
+ internal/proto/value.go                |  1 +
+ 4 files changed, 85 insertions(+), 8 deletions(-)
+ create mode 100644 internal/gameserver/fish_tv_kv_test.go
+
+diff --git a/internal/gameserver/fish_tv_kv_test.go b/internal/gameserver/fish_tv_kv_test.go
+new file mode 100644
+index 0000000..2676ba8
+--- /dev/null
++++ b/internal/gameserver/fish_tv_kv_test.go
+@@ -0,0 +1,35 @@
++package gameserver
++
++import (
++	"bytes"
++	"testing"
++
++	"rf4server/internal/config"
++	"rf4server/internal/logging"
++	"rf4server/internal/proto"
++)
++
++// TestFishTVShape30MatchesProduction 回归：面板 kv_shape=30 的编码字节必须与
++// 生产 fishTVKv 完全一致（typed 数组 "135"）。否则面板探测的结果代表不了
++// 线上行为——旧实现把 Items 重包成 KindKVList，编码器落到硬编码的
++// dejdolfnooh 类型名，字节与生产分叉。
++func TestFishTVShape30MatchesProduction(t *testing.T) {
++	srv := NewServer(config.Game{}, logging.Discard(), nil)
++	sess := newProbeSess(srv)
++	table := sess.Table()
++
++	prod, err := proto.EncodeValue(fishTVKv("g_tench", 3280), table)
++	if err != nil {
++		t.Fatal(err)
++	}
++	probe, err := proto.EncodeValue(fishTVKvShape(30, "g_tench", 3280), table)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Equal(prod, probe) {
++		t.Fatalf("shape30 bytes differ from production fishTVKv:\n prod=%x\nprobe=%x", prod, probe)
++	}
++	if !bytes.Contains(probe, []byte("135")) {
++		t.Fatalf("shape30 must use typed array type name 135, got %x", probe)
++	}
++}
+diff --git a/internal/gameserver/misc_fix.go b/internal/gameserver/misc_fix.go
+index 09f86f9..55d98ec 100644
+--- a/internal/gameserver/misc_fix.go
++++ b/internal/gameserver/misc_fix.go
+@@ -6,6 +6,7 @@ package gameserver
+ // 相同命令，因此这里只负责补齐缺失的处理。
+ 
+ import (
++	"encoding/hex"
+ 	"fmt"
+ 	"strconv"
+ 	"strings"
+@@ -513,6 +514,10 @@ func (s *Session) pushChatRaw(variant, kind int, text string) {
+ }
+ 
+ // fishTVKv 构造 401.f4 的鱼名和重量参数。
++// 容器为 [0x03][1B len "135"][u16 count][元素...]，类型名是 wiregen typeid
++// 400 的十进制字符串 "135"；元素带 typed 对象头 [0x01][u32le 400]。
++// 键1 = 鱼种文本（0x14 短字符串）、键2 = 重量（0x0D u32，客户端按
++// /1000f 转千克）。客户端 4.0.25034 实机验证可渲染且连接稳定。
+ func fishTVKv(fishKey string, weightG int64) *proto.Value {
+ 	if fishKey == "" {
+ 		fishKey = "g_tench"
+@@ -520,10 +525,11 @@ func fishTVKv(fishKey string, weightG int64) *proto.Value {
+ 	if weightG < 0 {
+ 		weightG = 0
+ 	}
+-	return proto.KVList(
+-		proto.KVEntry{Key: 1, Val: proto.StrVal(fishKey)},
+-		proto.KVEntry{Key: 2, Val: proto.U32(uint32(weightG))},
+-	)
++	head := append([]byte{}, fishKVElem(1, 0, true)[:5]...) // [0x01][u32le 400] typed 头
++	k1 := append(head, 0x01, 0x14, byte(len(fishKey)))
++	k1 = append(k1, fishKey...)
++	k2 := fishKVElem(2, uint32(weightG), true)
++	return fishKVRaw(fishKVArr("135", 2, k1, k2))
+ }
+ 
+ // fishTVKvShape 按 shape 编号构造 401.f4 钓获模板 KV 参数（键1=鱼种key
+@@ -611,11 +617,10 @@ func fishTVKvShape(shape int64, fishKey string, weightG int64) *proto.Value {
+ 			4: proto.U32(uint32(w)),
+ 		})
+ 	case 30:
+-		// 官方 KV 数组，附加榜单类型键 6。
++		// 官方 KV 数组：直接返回生产 fishTVKv（typed 数组 "135" + 对象头
++		// 元素），保证面板探测的推送字节与生产一致。
+ 		w, _ := strconv.ParseInt(v2, 10, 64)
+-		list := fishTVKv(v1, w)
+-		return &proto.Value{Kind: proto.KindKVList, Items: append(list.Items,
+-			&proto.Value{Kind: proto.KindKVEntry, Marker: 6, Items: []*proto.Value{proto.StrVal(v6)}})}
++		return fishTVKv(v1, w)
+ 	case 40:
+ 		return &proto.Value{Kind: proto.KindKVList}
+ 	case 41:
+@@ -644,6 +649,38 @@ func fishTVKvShape(shape int64, fishKey string, weightG int64) *proto.Value {
+ 	return nil
+ }
+ 
++// fishKVRaw 把原始字节包成直通值（KindRaw：Hex 原样上线）。
++func fishKVRaw(b []byte) *proto.Value {
++	return &proto.Value{Kind: proto.KindRaw, Hex: hex.EncodeToString(b)}
++}
++
++// fishKVArr 构造 0x03 对象数组容器：[0x03][1B len 类型名][u16 count][元素...]。
++// 类型名必须是数字字符串（wiregen typeid 的十进制形式），如 "400"→"135"。
++func fishKVArr(typeName string, count int, elems ...[]byte) []byte {
++	b := []byte{0x03, byte(len(typeName))}
++	b = append(b, typeName...)
++	b = append(b, proto.PackU16(uint32(count))...)
++	for _, e := range elems {
++		b = append(b, e...)
++	}
++	return b
++}
++
++// fishKVElem 构造单个 KV 元素字节：
++//
++//	typed=false：[键][int marker 0x0D][u32le 重量]（裸元素）
++//	typed=true ：[0x01][u32le 400][键][0x0D][u32le 重量]（typed 对象头元素）
++func fishKVElem(key byte, weight uint32, typed bool) []byte {
++	var b []byte
++	if typed {
++		b = append(b, 0x01)
++		b = append(b, proto.PackU32(400)...)
++	}
++	b = append(b, key, 0x0D)
++	b = append(b, proto.PackU32(weight)...)
++	return b
++}
++
+ // hSocialCurrent 处理 24/3 social/current / 24/2 social/auto：
+ // 返回当前公共聊天频道。客户端没有频道时聊天输入框不会发送 24/10。
+ func hSocialCurrent(ctx *Ctx) ([]byte, bool) {
+diff --git a/internal/proto/encode.go b/internal/proto/encode.go
+index 2f9a322..e971373 100644
+--- a/internal/proto/encode.go
++++ b/internal/proto/encode.go
+@@ -15,6 +15,10 @@ func EncodeValue(v *Value, table *OpsTable) ([]byte, error) {
+ 		return []byte{0x00}, nil
+ 	}
+ 	switch v.Kind {
++	case KindRaw:
++		// 探测直通：Hex 原样输出，不做任何包装。
++		return hexDecode(v.Hex)
++
+ 	case KindNull:
+ 		return []byte{0x00}, nil
+ 
+diff --git a/internal/proto/value.go b/internal/proto/value.go
+index fae23ed..fb1b726 100644
+--- a/internal/proto/value.go
++++ b/internal/proto/value.go
+@@ -36,6 +36,7 @@ const (
+ 	KindU64         Kind = "u64"
+ 	KindBool        Kind = "bool"
+ 	KindStr         Kind = "str"
++	KindRaw         Kind = "raw" // 原始字节直通：Hex 字段原样输出，探测用
+ 	KindElemNull    Kind = "elem_null"
+ )
+ 
+-- 
+2.54.0.windows.1
+

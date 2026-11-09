@@ -1,0 +1,183 @@
+﻿diff --git a/internal/admin/api.go b/internal/admin/api.go
+index 7f5ed37..b5f4f94 100644
+--- a/internal/admin/api.go
++++ b/internal/admin/api.go
+@@ -73,6 +73,7 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server
+ 	mux.HandleFunc("POST /api/players/skills/update", auth(s.handlePlayerSkillUpdate))
+ 	mux.HandleFunc("POST /api/players/skills/points", auth(s.handlePlayerSkillPoints))
+ 	mux.HandleFunc("POST /api/players/kick", auth(s.handleKick))
++	mux.HandleFunc("POST /api/players/teleport", auth(s.handleTeleport))
+ 	mux.HandleFunc("POST /api/players/ban", auth(s.handleBan))
+ 	mux.HandleFunc("GET /api/catalog/items", auth(s.handleCatalogItems))
+ 	mux.HandleFunc("GET /api/stores", auth(s.handleStores))
+@@ -471,6 +472,28 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
+ 	writeJSON(w, map[string]any{"ok": true})
+ }
+ 
++func (s *Server) handleTeleport(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		UID     int64   `json:"uid"`
++		X       float64 `json:"x"`
++		Z       float64 `json:"z"`
++		Loc     string  `json:"loc"`
++		Spot    uint64  `json:"spot"`
++		HoldSec int64   `json:"hold_sec"`
++	}
++	if err := readJSON(r, &req); err != nil || req.UID == 0 {
++		httpError(w, 400, "参数错误")
++		return
++	}
++	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{
++		"op": "teleport", "uid": req.UID, "x": req.X, "z": req.Z,
++		"loc": strings.TrimSpace(req.Loc), "spot": req.Spot, "hold_sec": req.HoldSec,
++	}))
++	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "teleport", strconv.FormatInt(req.UID, 10),
++		fmt.Sprintf("x=%.2f z=%.2f loc=%s spot=%d hold=%ds", req.X, req.Z, req.Loc, req.Spot, req.HoldSec))
++	writeJSON(w, map[string]any{"ok": true})
++}
++
+ func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
+ 	var req struct {
+ 		UID    int64 `json:"uid"`
+diff --git a/internal/admin/web/index.html b/internal/admin/web/index.html
+index 18282f0..f32be2b 100644
+--- a/internal/admin/web/index.html
++++ b/internal/admin/web/index.html
+@@ -323,6 +323,13 @@ function renderPlayerTab(){
+       <div class="field"><label>银行（分）</label><input id="pf_bank" type="number" value="${p.bank}"></div>
+       <div class="field"><label>会员</label><select id="pf_membership"><option value="0" ${p.membership? '':'selected'}>普通</option><option value="1" ${p.membership===1? 'selected':''}>限时高级会员</option><option value="2" ${p.membership===2? 'selected':''}>永久会员</option></select></div>
+       <div class="field span2"><label>会员到期</label><input id="pf_membership_exp" type="datetime-local" value="${localInput(p.membership_exp)}"></div>
++    </div><div class="form-grid" style="margin-top:12px">
++      <div class="field"><label>传送 X</label><input id="tp_x" type="number" step="0.01" placeholder="世界坐标 X"></div>
++      <div class="field"><label>传送 Z</label><input id="tp_z" type="number" step="0.01" placeholder="世界坐标 Z"></div>
++      <div class="field"><label>场景 loc（可选）</label><input id="tp_loc" placeholder="loc1_02"></div>
++      <div class="field"><label>钓点（可选）</label><input id="tp_spot" type="number" min="0" value="0"></div>
++      <div class="field"><label>保持秒数</label><input id="tp_hold" type="number" min="10" value="600"></div>
++      <div class="field" style="display:flex;align-items:flex-end"><button class="btn alt" onclick="teleportPlayer()">坐标传送</button></div>
+     </div><p class="muted" id="playerHappyHour">欢乐时光：${p.happy_hour?.enabled?(p.happy_hour.active?'生效中':'暂停'):'已关闭'} · 今日剩余 ${Math.ceil((p.happy_hour?.remaining_seconds??3600)/60)} 分钟 · 离线暂停，上海时间每日重置</p><div class="actions"><button class="btn good" onclick="saveProfile()">保存档案与货币</button><button class="btn alt" onclick="selectPlayer(${p.uid})">放弃修改</button></div>`;
+   }
+   if(PLAYER_TAB==='items')renderItems();
+@@ -346,6 +353,13 @@ async function saveProfile(){
+   }
+   await api('/api/players/update',{method:'POST',body:JSON.stringify(body)});toast('已保存，在线玩家立即收到刷新');await sleep(400);await selectPlayer(PLAYER.uid);
+ }
++async function teleportPlayer(){
++  const x=parseFloat($('#tp_x').value), z=parseFloat($('#tp_z').value);
++  if(!Number.isFinite(x)||!Number.isFinite(z)){toast('请填写 X 和 Z 坐标','bad');return;}
++  const body={uid:PLAYER.uid,x,z,loc:$('#tp_loc').value.trim(),spot:+$('#tp_spot').value||0,hold_sec:+$('#tp_hold').value||600};
++  await api('/api/players/teleport',{method:'POST',body:JSON.stringify(body)});
++  toast('坐标传送已下发：服务端按新坐标判定鱼群，画面不移动');
++}
+ function renderItems(){
+   $('#playerTabBody').innerHTML=`<div class="toolbar"><input class="grow" id="itemFilter" placeholder="筛选 item_id / 名称 / GUID" value="${esc(ITEM_FILTER)}" oninput="ITEM_FILTER=this.value;renderItemRows()"><button class="btn" onclick="showGrantItem()">+ 发放物品</button></div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>物品</th><th>类型</th><th>容器</th><th>数量</th><th>耐久</th><th>GUID</th><th></th></tr></thead><tbody id="itemRows"></tbody></table></div>`;
+   renderItemRows();
+diff --git a/internal/gameserver/fishing.go b/internal/gameserver/fishing.go
+index c31f00d..65536b1 100644
+--- a/internal/gameserver/fishing.go
++++ b/internal/gameserver/fishing.go
+@@ -33,9 +33,12 @@ type FishState struct {
+ 	PosX        float64
+ 	PosZ        float64
+ 	HasPos      bool
+-	CastPosX    float64
+-	CastPosZ    float64
+-	HasCastPos  bool
++	// TeleportUntil 是管理后台坐标传送的保护截止 unix。在此之前客户端 3/9
++	// 上报不会覆盖传送坐标；到期后恢复以客户端上报为准。
++	TeleportUntil int64
++	CastPosX      float64
++	CastPosZ      float64
++	HasCastPos    bool
+ 	// BoatUntil 是船票租用有效的截止 unix，3/7 验票上船时写入。0 表示本次会话
+ 	// 还没有上船证据，判鱼对“已上船”条件保持中性。
+ 	BoatUntil int64
+@@ -1672,7 +1675,10 @@ func (s *Server) onBiteTimerTicket(uid int64, ticket fishingTimerTicket) {
+ 		return
+ 	}
+ 	x, z, hasPos := st.CastPosX, st.CastPosZ, st.HasCastPos
+-	if !hasPos {
++	if now.Unix() < st.TeleportUntil {
++		// 管理后台坐标传送保护期内，判鱼坐标以传送点为准。
++		x, z, hasPos = st.PosX, st.PosZ, st.HasPos
++	} else if !hasPos {
+ 		x, z, hasPos = st.PosX, st.PosZ, st.HasPos
+ 	}
+ 	baitDepthCM := st.effectiveBaitDepthCMLocked(now)
+diff --git a/internal/gameserver/mailbox.go b/internal/gameserver/mailbox.go
+index c41060e..b544735 100644
+--- a/internal/gameserver/mailbox.go
++++ b/internal/gameserver/mailbox.go
+@@ -704,6 +704,11 @@ type AdminCommand struct {
+ 	Channel      int64               `json:"channel,omitempty"`  // fish_tv_test：聊天推送通道 24..31
+ 	Kind         int64               `json:"kind,omitempty"`     // fish_tv_test：401.f0 消息类型；负值为参数位探测
+ 	KVShape      int64               `json:"kv_shape,omitempty"` // fish_tv_test：401.f4 模板 KV 形状或外层参数探测编号
++	X            float64             `json:"x,omitempty"`        // teleport：世界坐标 X
++	Z            float64             `json:"z,omitempty"`        // teleport：世界坐标 Z
++	Loc          string              `json:"loc,omitempty"`      // teleport：可选场景 loc
++	Spot         uint64              `json:"spot,omitempty"`     // teleport：可选钓点序号
++	HoldSec      int64               `json:"hold_sec,omitempty"` // teleport：坐标保护秒数，默认 600
+ }
+ 
+ // StartAdminSubscriber 轮询共享 SQLite 队列，每 2 秒处理一批管理指令。
+@@ -747,6 +752,28 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
+ 			sess.Close("admin_kick")
+ 			s.log.Info("管理指令：踢下线", "uid", cmd.UID)
+ 		}
++	case "teleport":
++		// 服务端坐标传送：改写判鱼用的玩家坐标，并在保护期内忽略 3/9 覆盖。
++		// 客户端画面不动，鱼种分布/水体判定按新坐标生效。
++		st := s.stateFor(cmd.UID)
++		hold := cmd.HoldSec
++		if hold <= 0 {
++			hold = 600
++		}
++		until := time.Now().Unix() + hold
++		st.mu.Lock()
++		st.PosX, st.PosZ, st.HasPos = cmd.X, cmd.Z, true
++		if cmd.Loc != "" {
++			st.Loc = cmd.Loc
++		}
++		if cmd.Spot > 0 {
++			st.Spot = cmd.Spot
++		}
++		st.TeleportUntil = until
++		loc, spot := st.Loc, st.Spot
++		st.mu.Unlock()
++		s.log.Info("管理指令：坐标传送", "uid", cmd.UID, "x", cmd.X, "z", cmd.Z,
++			"loc", loc, "spot", spot, "hold_sec", hold)
+ 	case "grant_item":
+ 		row, _, err := s.AddToStack(ctx, cmd.UID, cmd.ItemID, "backpack", cmd.Qty)
+ 		if err != nil {
+diff --git a/internal/gameserver/water_pos.go b/internal/gameserver/water_pos.go
+index 91e3bb0..d117ef3 100644
+--- a/internal/gameserver/water_pos.go
++++ b/internal/gameserver/water_pos.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"sync"
++	"time"
+ )
+ 
+ // 位置与水体距离判定。
+@@ -104,6 +105,7 @@ func parsePositionBody(body []byte) (x, z float64, ok bool) {
+ }
+ 
+ // hPositionReport 处理 3/9：记录玩家世界坐标。
++// 管理后台坐标传送的保护期内忽略客户端上报，到期后恢复覆盖。
+ func hPositionReport(ctx *Ctx) ([]byte, bool) {
+ 	if ctx.Sess == nil || ctx.Sess.Srv == nil {
+ 		return nil, false
+@@ -113,7 +115,12 @@ func hPositionReport(ctx *Ctx) ([]byte, bool) {
+ 		return nil, false
+ 	}
+ 	st := ctx.Sess.Srv.stateFor(ctx.Sess.Userid)
++	now := time.Now().Unix()
+ 	st.mu.Lock()
++	if now < st.TeleportUntil {
++		st.mu.Unlock()
++		return nil, false
++	}
+ 	st.PosX = x
+ 	st.PosZ = z
+ 	st.HasPos = true

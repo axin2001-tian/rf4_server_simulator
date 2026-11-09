@@ -116,6 +116,10 @@ func (d *DB) Migrate() error {
 			return err
 		}
 	}
+	// 新库的 profile 由 00001 在补列步骤之后创建，需要再补一次。
+	if err := d.ensureLegacyPlayerColumns(); err != nil {
+		return fmt.Errorf("补全玩家表列: %w", err)
+	}
 	if d.static != nil {
 		guardCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -137,6 +141,8 @@ func (d *DB) ensureLegacyPlayerColumns() error {
 		{"profile", "region", "TEXT DEFAULT 'CN'"},
 		{"profile", "membership", "INTEGER NOT NULL DEFAULT 0"},
 		{"profile", "membership_exp", "INTEGER NOT NULL DEFAULT 0"},
+		{"profile", "happy_hour", "INTEGER NOT NULL DEFAULT 0"},
+		{"profile", "happy_hour_exp", "INTEGER NOT NULL DEFAULT 0"},
 		{"profile", "stars", "INTEGER NOT NULL DEFAULT 0"},
 		{"profile", "created_ts", "REAL"},
 		{"profile", "updated_ts", "REAL"},

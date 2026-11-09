@@ -55,12 +55,37 @@ func drinkRuleForItem(itemID string) (drinkRule, bool) {
 // drinkRate 前 75% 时间为峰值，最后 25% 时间线性降至零。
 func drinkRate(category string, remaining time.Duration) float64 {
 	rule, ok := drinkRuleForCategory(category)
-	if !ok || remaining <= 0 {
+	if !ok {
 		return 0
 	}
-	tail := rule.Duration / 4
-	if remaining >= tail {
-		return rule.Peak
+	return drinkRateForPeak(rule.Peak, rule.Duration, remaining)
+}
+
+// drinkPeakByPrice 按商店售价折算酒类经验加成峰值：越贵加成越高。
+// 1 金币按 100 银币折算，3% 起步、每 100 银币 +0.25%，上限 30%。
+func drinkPeakByPrice(silver, gold int64) float64 {
+	if silver < 0 {
+		silver = 0
 	}
-	return rule.Peak * float64(remaining) / float64(tail)
+	if gold < 0 {
+		gold = 0
+	}
+	value := float64(silver) + float64(gold)*100
+	peak := 0.03 + value/100*0.0025
+	if peak > 0.30 {
+		peak = 0.30
+	}
+	return peak
+}
+
+// drinkRateForPeak 前 75% 时间为峰值，最后 25% 时间线性降至零。
+func drinkRateForPeak(peak float64, duration, remaining time.Duration) float64 {
+	if peak <= 0 || duration <= 0 || remaining <= 0 {
+		return 0
+	}
+	tail := duration / 4
+	if remaining >= tail {
+		return peak
+	}
+	return peak * float64(remaining) / float64(tail)
 }

@@ -261,6 +261,9 @@ func (d *DB) augmentShopShelf(ctx context.Context, def shopStoreDefinition, shel
 		if have[id] || !cats[m.Category] || partCategories[m.Category] {
 			continue
 		}
+		if isFestivalItemID(id) {
+			continue
+		}
 		isBook := m.Category == shopBookCategory
 		if isBook {
 			// 技能书只按地区白名单上架，未登记的书一律不补。
@@ -341,6 +344,36 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// isFestivalItemID 判断商品是否为圣诞/新年节日限定商品。
+// 游戏内不再上架任何节日商品，自动补货时必须永久跳过这些 item_id
+// （与礼物袋 gift_bag 无关，福袋掉落功能保留）。
+func isFestivalItemID(itemID string) bool {
+	id := strings.ToLower(strings.TrimSpace(itemID))
+	if id == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(id, "_ny25"),
+		strings.Contains(id, "_ny26"),
+		strings.Contains(id, "_ny_"),
+		strings.HasSuffix(id, "_ny"),
+		strings.HasSuffix(id, "nye"),
+		strings.HasPrefix(id, "var_hny"),
+		strings.HasPrefix(id, "camp_lamp_ny"),
+		strings.HasPrefix(id, "float_ny"),
+		strings.HasPrefix(id, "waggler_ny"),
+		strings.HasPrefix(id, "sweater_ny_"):
+		return true
+	}
+	switch id {
+	case "bcr_6049", "handle_10079", "handle_10080", "handle_zmn_versac_10081",
+		"knobs_854", "spool_200108", "rodblank_2040", "rodblank_2041", "rodblank_2042",
+		"ny_2026_cup", "ny_2026_extra_cup", "tele_10254", "tele_10254_26", "waggler_boxny5":
+		return true
+	}
+	return false
 }
 
 // stableHash 是 item_id 的稳定散列，用于价格微浮动。

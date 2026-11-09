@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // 位置与水体距离判定。
@@ -104,6 +105,7 @@ func parsePositionBody(body []byte) (x, z float64, ok bool) {
 }
 
 // hPositionReport 处理 3/9：记录玩家世界坐标。
+// 管理后台坐标传送的保护期内忽略客户端上报，到期后恢复覆盖。
 func hPositionReport(ctx *Ctx) ([]byte, bool) {
 	if ctx.Sess == nil || ctx.Sess.Srv == nil {
 		return nil, false
@@ -112,8 +114,13 @@ func hPositionReport(ctx *Ctx) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+	now := time.Now().Unix()
 	for _, st := range ctx.Sess.Srv.fishingStatesFor(ctx.Sess.Userid) {
 		st.mu.Lock()
+		if now < st.TeleportUntil {
+			st.mu.Unlock()
+			continue
+		}
 		st.PosX, st.PosZ, st.HasPos = x, z, true
 		st.mu.Unlock()
 	}

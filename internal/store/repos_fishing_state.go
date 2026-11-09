@@ -27,6 +27,7 @@ type FishingFish struct {
 	LocLevel       string  `json:"loc_level"`
 	NamedID        string  `json:"named_id"`
 	Name           string  `json:"name"`
+	GiftBagID      string  `json:"gift_bag_id,omitempty"`
 }
 
 // FishingState 是 FishState 的可持久化子集。Keepnet 是 DB 权威缓存，

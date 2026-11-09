@@ -39,6 +39,10 @@ func openCatchHistoryDBAtVersion(t *testing.T, version int64) *DB {
 			t.Fatal(err)
 		}
 	}
+	// 与 Migrate 一致：旧库先补齐后来新增的列，避免仓储查询缺列。
+	if err := db.ensureLegacyPlayerColumns(); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
