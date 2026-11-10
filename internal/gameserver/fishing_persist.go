@@ -85,6 +85,7 @@ func applyPersistedFishingState(st *FishState, saved *store.FishingState) {
 		st.Spot = saved.Spot
 	}
 	st.DepthCM = saved.DepthCM
+	st.CastM = saved.CastM
 	st.CastActive = saved.CastActive
 	st.CastTs = saved.CastTS
 	st.FallTs = saved.FallTS
@@ -128,6 +129,7 @@ func fishingStateSnapshot(st *FishState) *store.FishingState {
 		Loc:            st.Loc,
 		Spot:           st.Spot,
 		DepthCM:        st.DepthCM,
+		CastM:          st.CastM,
 		CastActive:     st.CastActive,
 		CastTS:         st.CastTs,
 		FallTS:         st.FallTs,
@@ -155,22 +157,35 @@ func rolledFishToStore(f *RolledFish) *store.FishingFish {
 		return nil
 	}
 	return &store.FishingFish{
-		GearGUID:   f.GearGUID,
-		HookGUID:   f.HookGUID,
-		BaitGUIDs:  f.BaitGUIDs,
-		BaitsKnown: f.BaitsKnown,
-		HappyHour:  f.HappyHour, HappyHourKnown: f.HappyHourKnown,
-		FishGUID:  f.FishGUID,
-		Species:   f.Species,
-		Grade:     f.Grade,
-		WeightG:   f.WeightG,
-		LengthM:   f.LengthM,
-		XP:        f.XP,
-		Silver:    f.Silver,
-		LocLevel:  f.LocLevel,
-		NamedID:   f.NamedID,
-		Name:      f.Name,
-		GiftBagID: f.GiftBagID,
+		GearGUID:    f.GearGUID,
+		HookGUID:    f.HookGUID,
+		BaitGUIDs:   f.BaitGUIDs,
+		BaitsKnown:  f.BaitsKnown,
+		BiteQuality: f.BiteQuality, HookHoldP: f.HookHoldP, LuckProtected: f.LuckProtected,
+		HookConfirmed: f.HookConfirmed,
+		HuntStage:     f.HuntStage, HuntStageKnown: f.HuntStageKnown,
+		HappyHour: f.HappyHour, HappyHourKnown: f.HappyHourKnown,
+		FishGUID:       f.FishGUID,
+		Species:        f.Species,
+		Grade:          f.Grade,
+		WeightG:        f.WeightG,
+		LengthM:        f.LengthM,
+		XP:             f.XP,
+		Silver:         f.Silver,
+		LocLevel:       f.LocLevel,
+		NamedID:        f.NamedID,
+		Name:           f.Name,
+		QualBaitID:     f.QualBait.ID,
+		QualBaitCat:    f.QualBait.Cat,
+		QualBaitClass:  f.QualBait.Class,
+		QualBaitFlavor: f.QualBait.Flavor,
+		QualBaitLenCM:  f.QualBait.LenCM,
+		QualBaitSizeMM: f.QualBait.SizeMM,
+		CastM:          f.CastM,
+		IsNight:        f.IsNight,
+		DepthCM:        f.DepthCM,
+		OnBoat:         f.OnBoat,
+		Drift:          f.Drift,
 	}
 }
 
@@ -179,22 +194,38 @@ func rolledFishFromStore(f *store.FishingFish) *RolledFish {
 		return nil
 	}
 	return &RolledFish{
-		GearGUID:   f.GearGUID,
-		HookGUID:   f.HookGUID,
-		BaitGUIDs:  f.BaitGUIDs,
-		BaitsKnown: f.BaitsKnown,
-		HappyHour:  f.HappyHour, HappyHourKnown: f.HappyHourKnown,
-		FishGUID:  f.FishGUID,
-		Species:   f.Species,
-		Grade:     f.Grade,
-		WeightG:   f.WeightG,
-		LengthM:   f.LengthM,
-		XP:        f.XP,
-		Silver:    f.Silver,
-		LocLevel:  f.LocLevel,
-		NamedID:   f.NamedID,
-		Name:      f.Name,
-		GiftBagID: f.GiftBagID,
+		GearGUID:    f.GearGUID,
+		HookGUID:    f.HookGUID,
+		BaitGUIDs:   f.BaitGUIDs,
+		BaitsKnown:  f.BaitsKnown,
+		BiteQuality: f.BiteQuality, HookHoldP: f.HookHoldP, LuckProtected: f.LuckProtected,
+		HookConfirmed: f.HookConfirmed,
+		HuntStage:     f.HuntStage, HuntStageKnown: f.HuntStageKnown,
+		HappyHour: f.HappyHour, HappyHourKnown: f.HappyHourKnown,
+		FishGUID: f.FishGUID,
+		Species:  f.Species,
+		Grade:    f.Grade,
+		WeightG:  f.WeightG,
+		LengthM:  f.LengthM,
+		XP:       f.XP,
+		Silver:   f.Silver,
+		LocLevel: f.LocLevel,
+		NamedID:  f.NamedID,
+		Name:     f.Name,
+
+		QualBait: qualificationBait{
+			ID:     f.QualBaitID,
+			Cat:    f.QualBaitCat,
+			Class:  f.QualBaitClass,
+			Flavor: f.QualBaitFlavor,
+			LenCM:  f.QualBaitLenCM,
+			SizeMM: f.QualBaitSizeMM,
+		},
+		CastM:   f.CastM,
+		IsNight: f.IsNight,
+		DepthCM: f.DepthCM,
+		OnBoat:  f.OnBoat,
+		Drift:   f.Drift,
 	}
 }
 

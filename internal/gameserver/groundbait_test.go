@@ -262,15 +262,22 @@ func TestGroundbaitCatapultThrowDepositsSpot(t *testing.T) {
 		t.Fatal("13/5 未处理")
 	}
 	gate := s.groundbaitSpot(ctx, uid, "gb-test-loc", int64(100/groundbaitCellSizeM), int64(100/groundbaitCellSizeM))
-	if gate.units < 0.99 || gate.units > 1.01 {
-		t.Fatalf("弹弓一弹应投进 1 份窝料，实得 %.3f", gate.units)
+	// 窝料游戏钟按整秒推进；投放后立即读取时可能已经走过一个 tick，
+	// 默认 1 份 0.6 游戏小时会按剩余时间稀释到约 0.989。精确份数由
+	// 账本字段断言，这里只要求它确实落在目标格且没有被放大。
+	if gate.units <= 0 || gate.units > 1.000001 {
+		t.Fatalf("弹弓一弹应投进目标窝点，实得 %.3f", gate.units)
 	}
 	var channel, itemID, matsJSON string
-	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT channel,item_id,materials_json FROM groundbait_deposit WHERE uid=?`, uid).Scan(&channel, &itemID, &matsJSON); err != nil {
+	var portions, unitsLeft float64
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT channel,item_id,materials_json,portions,units_left FROM groundbait_deposit WHERE uid=?`, uid).Scan(&channel, &itemID, &matsJSON, &portions, &unitsLeft); err != nil {
 		t.Fatalf("弹弓投放没落账: %v", err)
 	}
 	if channel != "catapult" || itemID != "feedcompleted" {
 		t.Fatalf("投放通道/物品不符: %s %s", channel, itemID)
+	}
+	if portions != 1 || unitsLeft != 1 {
+		t.Fatalf("弹弓一弹应入账 1 份且未消耗，实得 portions=%.3f units_left=%.3f", portions, unitsLeft)
 	}
 	mats := groundbaitDecodeMaterials(matsJSON)
 	if len(mats) != 3 || mats[0] != "mix_groundpeas" || mats[1] != "feedadds_corn" || mats[2] != "aroma_vanila" {
@@ -499,9 +506,8 @@ func TestGroundbaitUnknownLandingStillWorks(t *testing.T) {
 	}
 }
 
-// TestGroundbaitNeighborCellCountsWeaker 邻格容差。弹弓与手抛只报距离，落点只能算到
-// 几米精度；实测客户端本次抛饵散布 scatter=3.0 米，5 米方格很容易把同一团窝切在边界
-// 两侧。相邻一格的窝按衰减系数计入，隔两格以上才算无关；咬口扣份先扣本格再扣邻格。
+// TestGroundbaitNeighborCellCountsWeaker 验证圆形落点范围：浮标离窝料越远，
+// 窝效越低；范围外为 0；咬口扣份优先扣离浮标最近的窝。
 func TestGroundbaitNeighborCellCountsWeaker(t *testing.T) {
 	s, _ := newRigTestServer(t)
 	ctx := t.Context()
@@ -545,21 +551,25 @@ func TestGroundbaitNeighborCellCountsWeaker(t *testing.T) {
 		t.Fatalf("邻格抬升（%.2f）必须低于同份数本格窝（%.2f）", near, same)
 	}
 
-	bx, bz := int64(300/groundbaitCellSizeM), int64(300/groundbaitCellSizeM)
-	st := s.groundbaitSpot(ctx, uidNear, "gb-test-loc", bx, bz)
+	st := s.groundbaitSpotAt(ctx, uidNear, "gb-test-loc", 300, 300, true, 7)
 	if st.batches != 1 || st.near != 1 || st.diffuse != 0 {
-		t.Fatalf("应看到 1 批邻格窝且不算落点未知，实得 batches=%d near=%d diffuse=%d", st.batches, st.near, st.diffuse)
+		t.Fatalf("应看到 1 批距离衰减窝且不算落点未知，实得 batches=%d near=%d diffuse=%d", st.batches, st.near, st.diffuse)
 	}
-	if st.units < 3.19 || st.units > 3.21 {
-		t.Fatalf("8 份邻格窝按 0.40 衰减应得 N=3.2，实得 %.3f", st.units)
+	// (305,302) 距浮标 sqrt(5²+2²)=5.385m，圆形权重约 0.815。
+	if st.units < 6.5 || st.units > 6.55 {
+		t.Fatalf("8 份 5.385m 外窝按圆形衰减应得 N≈6.52，实得 %.3f", st.units)
 	}
 
-	// 容差调 0：退回严格同格，邻格窝彻底无关。
-	setWeatherTestTunable(t, s, "groundbait_neighbor_cells", "0")
+	// 把影响半径压到 0，验证范围外彻底无关。
+	setWeatherTestTunable(t, s, "groundbait_range_core_m", "0")
+	setWeatherTestTunable(t, s, "groundbait_range_mid_m", "0")
+	setWeatherTestTunable(t, s, "groundbait_range_outer_m", "0")
 	if back := roll(uidNear); back != 100 {
-		t.Fatalf("容差=0 时邻格窝不该影响浮标格，实得 %.2f", back)
+		t.Fatalf("影响半径=0 时范围外窝不该影响浮标格，实得 %.2f", back)
 	}
-	setWeatherTestTunable(t, s, "groundbait_neighbor_cells", "1")
+	setWeatherTestTunable(t, s, "groundbait_range_core_m", "4")
+	setWeatherTestTunable(t, s, "groundbait_range_mid_m", "7")
+	setWeatherTestTunable(t, s, "groundbait_range_outer_m", "10")
 
 	// 咬口扣份优先本格：本格只剩 1 份，先吃掉它，邻格那 8 份此刻不动。
 	const uidMix = int64(1000004)

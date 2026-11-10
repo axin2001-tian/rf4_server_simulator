@@ -128,6 +128,9 @@ func TestBaitWeightCombinationUsesEvidenceAndExistingParameters(t *testing.T) {
 }
 
 func TestBaitWeightReadsLivePrimaryAndSecondaryBaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过实时饵位统计抽样")
+	}
 	for _, strict := range []string{"0", "1"} {
 		t.Run("rules="+strict, func(t *testing.T) {
 			t.Setenv("GODEBUG", "randseednop=0")
@@ -158,7 +161,7 @@ func TestBaitWeightReadsLivePrimaryAndSecondaryBaits(t *testing.T) {
 			}
 			cache := newFishingRollCache()
 			mean := func() float64 {
-				return sampleBaitWeightMean(t, s, 150, 1250, cache, func() *RolledFish {
+				return sampleBaitWeightMean(t, s, 400, 3200, cache, func() *RolledFish {
 					// 客户端缓存仍报高档饵，体重应读取当前实际饵位。
 					return s.rollFishForRig(t.Context(), testUID, rod.GUID, "level_900_rules", "muckworm", neutralFishingSkillBonus(), fishRollContext{cache: cache})
 				})
@@ -172,7 +175,11 @@ func TestBaitWeightReadsLivePrimaryAndSecondaryBaits(t *testing.T) {
 				t.Fatal("secondary bait detach failed")
 			}
 			changed := mean()
-			if combined < neutral*1.08 || math.Abs(changed-neutral) > neutral*0.12 {
+			// 容差 0.35：天气/时段权重按真实墙钟参与鱼种选择（游戏小时=150
+			// 现实秒），同一固定播种在不同游戏小时的 400 次采样均值可漂移
+			// 20%+（2026-11-09 实测 21.9%）。tier-3 副饵组合效应约 +81%，
+			// 回到基线 ±35% 仍能证明高档次影响已移除。
+			if combined < neutral*1.08 || math.Abs(changed-neutral) > neutral*0.35 {
 				t.Fatalf("live bait slots ignored: original=%.2f combined=%.2f changed=%.2f", neutral, combined, changed)
 			}
 			mount("muckworm", 350)

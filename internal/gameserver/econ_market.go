@@ -7,10 +7,12 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,6 +141,7 @@ func marketRatePerG(species string, grade int64) float64 {
 // 无可用数据或倍率未登记时返回 0，调用方回退到基础速率。
 func marketSilverPerKgOverlay(mapKey, fishKey string, grade int64) float64 {
 	overlayOnce.Do(loadMarketOverlay)
+	mapKey = normalizeMarketMapKey(mapKey)
 	if marketPriceTable == nil || len(marketPriceTable) == 0 {
 		return 0
 	}
@@ -206,6 +209,34 @@ func loadMarketOverlay() {
 	}
 }
 
+// normalizeMarketMapKey 把客户端的鱼市场景键（如 level_004_fishmarket）归一到
+// 价格表中的地图键（level_004_torfyanoe_ozero），否则覆盖价查不到会回退基础速率。
+func normalizeMarketMapKey(mapKey string) string {
+	if _, ok := marketPctTable[mapKey]; ok {
+		return mapKey
+	}
+	// 形如 level_004_fishmarket：地图键在前，场景后缀在后。
+	if strings.HasSuffix(mapKey, "_fishmarket") {
+		base := strings.TrimSuffix(mapKey, "_fishmarket")
+		for m := range marketPctTable {
+			if m == base || strings.HasPrefix(m, base+"_") {
+				return m
+			}
+		}
+		return mapKey
+	}
+	// 形如 fishmarket_012：编号在前，映射到 level_012_* 的地图键。
+	if strings.HasPrefix(mapKey, "fishmarket_") {
+		num := strings.TrimPrefix(mapKey, "fishmarket_")
+		for m := range marketPctTable {
+			if strings.HasPrefix(m, "level_"+num+"_") {
+				return m
+			}
+		}
+	}
+	return mapKey
+}
+
 // marketMapPct 返回水域鱼市价格倍率；未登记时返回 0。
 func marketMapPct(mapKey string) float64 {
 	overlayOnce.Do(loadMarketOverlay)
@@ -214,6 +245,30 @@ func marketMapPct(mapKey string) float64 {
 
 // marketPriceCentsForMap 计算单条鱼的鱼市报价（银币分）。
 // 优先使用水域覆盖价，未命中时使用基础速率，两者都乘以新鲜度。
+// marketDayForced 允许用环境变量 RF4_MARKET_DAY 覆盖鱼市日期（yyyyMMdd），
+// 仅用于验证每日价格波动；空值时使用真实 UTC 日期。读取发生在包初始化，
+// 计价路径不做文件 I/O。
+var marketDayForced = os.Getenv("RF4_MARKET_DAY")
+
+func marketDay(now float64) string {
+	if marketDayForced != "" {
+		return marketDayForced
+	}
+	return time.Unix(int64(now), 0).UTC().Format("20060102")
+}
+
+// dailyMarketFactor 返回按 UTC 日期与鱼种确定的每日价格系数，范围 0.95–1.05。
+// 同一鱼种在同一天内稳定，跨天重新取值，用于模拟鱼市日价波动。
+func dailyMarketFactor(species string, now float64) float64 {
+	day := marketDay(now)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(day))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(species))
+	r := float64(h.Sum32()%10000) / 9999.0
+	return 0.95 + 0.10*r
+}
+
 func marketPriceCentsForMap(e *store.KeepnetEntry, now float64, mapKey string) int64 {
 	w := e.WeightG
 	if w < 1 {
@@ -224,10 +279,11 @@ func marketPriceCentsForMap(e *store.KeepnetEntry, now float64, mapKey string) i
 		grade = 1
 	}
 	fresh := freshnessFactor(e.TS, now)
+	factor := dailyMarketFactor(e.Species, now)
 	if perKg := marketSilverPerKgOverlay(mapKey, e.Species, grade); perKg > 0 {
-		return int64(math.Max(1, math.Round(perKg*(float64(w)/1000.0)*100*fresh)))
+		return int64(math.Max(1, math.Round(perKg*factor*(float64(w)/1000.0)*100*fresh)))
 	}
-	return int64(math.Max(1, math.Round(marketRatePerG(e.Species, grade)*float64(w)*100*fresh)))
+	return int64(math.Max(1, math.Round(marketRatePerG(e.Species, grade)*factor*float64(w)*100*fresh)))
 }
 
 // marketPriceCents 在未指定地图时计算报价，地图路径应使用 marketPriceCentsForMap。
@@ -269,6 +325,7 @@ func hMarketRate(ctx *Ctx) ([]byte, bool) {
 	uid := ctx.Sess.Userid
 	cctx := ctx.Sess.pushCtx()
 	now := float64(time.Now().Unix())
+	sellMapKey := srv.currentLevel(uid)
 	out := proto.Args(proto.S("111"))
 	rotten := 0
 	locked := srv.openMarketOfferFishSet(cctx, uid)
@@ -285,8 +342,8 @@ func hMarketRate(ctx *Ctx) ([]byte, bool) {
 			flag = 1
 			rotten++
 		}
-		mapKey := srv.levelKeyOfLoc(cctx, uid, e.KeepLoc)
-		price := marketPriceCentsForMap(e, now, mapKey)
+		// 鱼市按卖鱼时所在水域计价：同一批鱼在不同地图卖出，价格随该图倍率变化。
+		price := marketPriceCentsForMap(e, now, sellMapKey)
 		out.Items = append(out.Items, wiregen.MustMakeObj("jpmlmnfkbfn", map[int]*proto.Value{
 			0: proto.Guid(g),
 			1: proto.U64(uint64(price)),
@@ -318,12 +375,8 @@ func hMarketSell(ctx *Ctx) ([]byte, bool) {
 	guids := uniqueStrings(deepGUIDs(ctx.Tree))
 
 	// 地图解析使用连接池，必须在事务前完成；事务内只重读护网行并核价。
-	levels := map[string]string{}
-	if list, err := srv.DB.KeepnetList(cctx, uid); err == nil {
-		for _, e := range list {
-			levels[e.EchoGUID] = srv.levelKeyOfLoc(cctx, uid, e.KeepLoc)
-		}
-	}
+	// 鱼市按卖鱼时所在水域计价，与鱼的钓获地图无关。
+	sellMapKey := srv.currentLevel(uid)
 
 	type soldPair struct {
 		guid  string
@@ -366,10 +419,7 @@ func hMarketSell(ctx *Ctx) ([]byte, bool) {
 			ctx.Log.Warn("20/2 读取挂单锁失败", "guid", g, "err", err)
 			return []byte{0x0F}, true
 		}
-		mapKey := levels[g]
-		if mapKey == "" && e.KeepLevel != "" {
-			mapKey = e.KeepLevel
-		}
+		mapKey := sellMapKey
 		price := marketPriceCentsForMap(e, now, mapKey)
 		sold = append(sold, soldPair{guid: g, price: price})
 		total += price
@@ -676,6 +726,21 @@ func (s *Server) repairPartsOf(ctx context.Context, it *store.Item) []repairPart
 		if v == nil || v.Kind != proto.KindObj {
 			return 1.0
 		}
+		// 摩擦片的权威状态是制动力 csDragForce，耐久字段只是它的显示镜像
+		// （见 degradeFrictionWasherFields）。只读镜像会让磨穿的摩擦片报成
+		// 100% 完好，与 f3 报价、客户端"损耗"显示自相矛盾。
+		if idx := fieldIdxByCS(v.Class, csDragForce); idx >= 0 && idx < v.FieldCount() {
+			if cur, present, _ := frictionWasherDrag(v); present {
+				if nidx := fieldIdxByCS(v.Class, csNumericID); nidx >= 0 && nidx < v.FieldCount() {
+					if def, derr := s.DB.GetItemDef(ctx, int64(u64Of(v.Fields[nidx].Num))); derr == nil &&
+						def != nil && def.Category == reelPartCatWasher {
+						if rated := itemDefF32(def, gearAttrDragMax) * it.Workmanship; rated > 0 {
+							return clampUnit(cur / rated)
+						}
+					}
+				}
+			}
+		}
 		// 子件耐久字段按类名查（竿件在下标 15，渔轮件在下标 6），值以 f32 位形存放。
 		if idx := fieldIdxByCS(v.Class, csDurability); idx >= 0 && idx < v.FieldCount() {
 			if f := v.Field(idx); f.Num != nil {
@@ -980,6 +1045,21 @@ func (s *Server) partAlternatives(ctx context.Context, reelItemID string, part r
 				}
 			}
 			rows.Close()
+			reelBrand := ""
+			if reelDef, derr := s.DB.GetItemDefByItemID(ctx, reelItemID); derr == nil && reelDef != nil {
+				reelBrand = reelDef.Brand
+			}
+			// 品牌专用油排在同品质通用油前面，客户端工坊列表会优先展示
+			// 当前轮子最匹配的保养品；不匹配油仍保留可用性。
+			sort.SliceStable(oils, func(i, j int) bool {
+				mi := reelOilMatchFactor(reelItemID, reelBrand, oils[i])
+				mj := reelOilMatchFactor(reelItemID, reelBrand, oils[j])
+				if mi != mj {
+					return mi < mj
+				}
+				// 同一匹配档保持查询原有的品质/编号顺序。
+				return false
+			})
 			for _, id := range oils {
 				addJob(id)
 			}
@@ -1161,9 +1241,20 @@ func hWorkshopDiag(ctx *Ctx) ([]byte, bool) {
 	}
 	comps := proto.Args(proto.S("143")) // 元素类 hlopebmchhp(poolccanfhd, type_id 504) 的 args code
 	if row, rerr := srv.DB.GetItemByGUID(cctx, guid); rerr == nil && row != nil {
+		// 渔轮同型号修理会整机恢复，21/2 对每个内件都报整机保养价。
+		// 客户端按选中的内件上报 f3；多选时会累加多次，21/3 仍只收一次。
+		reelServiceSilver := int64(-1)
+		if def, derr := srv.itemDefForRow(cctx, row); derr == nil && def != nil && def.Category == gearCatReel {
+			if fields, ferr := FieldsFromJSON(row.FieldsJSON); ferr == nil {
+				reelServiceSilver = int64(math.Round(srv.reelRepairWearInFields(cctx, row, fields) * 500))
+			}
+		}
 		for _, p := range srv.repairPartsOf(cctx, row) {
-			// f3 = 该零件的修理报价（按磨损计价，完好度 1.0 → 0）
+			// f3 = 该零件的修理报价（按磨损计价，完好度 1.0 → 0）；渔轮为整机保养价。
 			repairSilver := int64(math.Round(math.Max(0, 1-p.Cond) * 500))
+			if reelServiceSilver >= 0 {
+				repairSilver = reelServiceSilver
+			}
 			comps.Items = append(comps.Items, wiregen.MustMakeObj("hlopebmchhp", map[int]*proto.Value{
 				0: proto.Guid(p.GUID),
 				1: proto.U32(proto.F32Bits(float32(p.Cond))),
@@ -1191,6 +1282,46 @@ func hWorkshopDiag(ctx *Ctx) ([]byte, bool) {
 type partOrder struct {
 	Cat   uint32
 	SysID string
+}
+
+// workshopQuoteMatches 只接受与服务端价格接近的客户端报价，允许少量整数取整
+// 误差；实际扣费始终使用服务端价格，客户端无法通过伪造 f3 压价。
+func workshopQuoteMatches(clientCost, serverCost int64) bool {
+	if clientCost <= 0 {
+		return true
+	}
+	if serverCost < 0 {
+		return false
+	}
+	tolerance := serverCost / 20
+	if tolerance < 1 {
+		tolerance = 1
+	}
+	delta := clientCost - serverCost
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= tolerance
+}
+
+// workshopQuoteCovers 接受不低于服务端价格的客户端报价。渔轮多选时客户端会把
+// 每个内件的整机保养价累加，报价可能高于实际只收一次的服务端价格。
+func workshopQuoteCovers(clientCost, serverCost int64) bool {
+	if clientCost <= 0 {
+		return true
+	}
+	if serverCost < 0 {
+		return false
+	}
+	tolerance := serverCost / 20
+	if tolerance < 1 {
+		tolerance = 1
+	}
+	floor := serverCost - tolerance
+	if floor < 0 {
+		floor = 0
+	}
+	return clientCost >= floor
 }
 
 // hWorkshopOrder 处理 21/3：按客户端提交的条目更换零件、扣费并返回更新后的物品树。
@@ -1254,9 +1385,17 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 	if ferr != nil {
 		return nil, false
 	}
+	itemDef, itemDefErr := srv.itemDefForRow(cctx, row)
+	isReel := itemDefErr == nil && itemDef != nil && itemDef.Category == gearCatReel
+	reelWearBefore := 0.0
+	if isReel {
+		reelWearBefore = srv.reelRepairWearInFields(cctx, row, fields)
+	}
 
 	silver, gold := int64(0), int64(0)
 	changed := false
+	hasRepair := false
+	allRepairs := len(orders) > 0
 	for _, o := range orders {
 		idx := -1
 		for i := range fields {
@@ -1269,11 +1408,13 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 			}
 		}
 		if idx < 0 {
+			allRepairs = false
 			continue
 		}
 		// 同型号 = 修理（恢复耐久，按磨损计价）；不同型号 = 更换。
 		if installed := srv.childSystemID(cctx, fields[idx].Val); installed != "" &&
 			strings.EqualFold(installed, o.SysID) {
+			hasRepair = true
 			ch := fields[idx].Val
 			if didx := fieldIdxByCS(ch.Class, csDurability); didx >= 0 && didx < ch.FieldCount() {
 				old := float64(math.Float32frombits(ch.Fields[didx].U32()))
@@ -1283,6 +1424,7 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 			changed = true
 			continue
 		}
+		allRepairs = false
 		def, derr := srv.DB.GetItemDefByItemID(cctx, o.SysID)
 		if derr != nil || def == nil {
 			continue
@@ -1291,6 +1433,9 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 		if cerr != nil || child == nil {
 			continue
 		}
+		// 全新件必须写满耐久：轮内零件耐久会聚合成本体那一格，换上去就缺耐久
+		// 等于给玩家装了一只坏件，本体永远抬不回来。
+		setReelChildDurability(child, 1)
 		fields[idx].Val = child
 		ps, pg := srv.partPrice(cctx, o.SysID, def.Category)
 		silver += ps
@@ -1300,12 +1445,47 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 	if !changed {
 		return nil, false
 	}
+	if useGold && hasRepair {
+		ctx.Log.Warn("工坊修理：同型号修理仅支持银币支付", "guid", shortGUID(row.GUID))
+		return nil, false
+	}
+	wholeItemRepair := allRepairs
+	if allRepairs {
+		if isReel {
+			if _, ierr := srv.restoreReelInternalsInFields(cctx, row, fields); ierr != nil {
+				ctx.Log.Warn("工坊修理：轮内零件恢复失败", "guid", shortGUID(row.GUID), "err", ierr)
+				return nil, false
+			}
+			// 整机保养会恢复全部内件，费用必须覆盖实际恢复的全部磨损。
+			silver = int64(math.Round(reelWearBefore * 500))
+			gold = 0
+		}
+	}
 	costSilver, costGold := silver, gold
+	if useGold {
+		if costGold <= 0 {
+			ctx.Log.Warn("工坊换件：金币价格为 0，拒绝零金额交易", "item", shortGUID(itemGUID))
+			return nil, false
+		}
+	} else if costSilver <= 0 {
+		ctx.Log.Warn("工坊换件：银币价格为 0，拒绝零金额交易", "item", shortGUID(itemGUID))
+		return nil, false
+	}
 	if clientCost > 0 {
+		quotedCost := costSilver
 		if useGold {
-			costGold = clientCost
-		} else {
-			costSilver = clientCost
+			quotedCost = costGold
+		}
+		if wholeItemRepair && isReel {
+			if !workshopQuoteCovers(clientCost, quotedCost) {
+				ctx.Log.Warn("工坊修理：客户端报价异常", "item", shortGUID(itemGUID),
+					"client", clientCost, "server", quotedCost, "gold", useGold)
+				return nil, false
+			}
+		} else if !workshopQuoteMatches(clientCost, quotedCost) {
+			ctx.Log.Warn("工坊换件：客户端报价异常", "item", shortGUID(itemGUID),
+				"client", clientCost, "server", quotedCost, "gold", useGold)
+			return nil, false
 		}
 	}
 	p, perr := srv.DB.EnsureProfile(cctx, ctx.Sess.Userid)
@@ -1317,15 +1497,11 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 			ctx.Log.Info("工坊换件：金币不足", "balance", p.Gold, "cost", costGold)
 			return nil, false
 		}
-		_ = srv.DB.UpdateBalance(cctx, ctx.Sess.Userid, p.Silver, p.Gold-costGold, p.Bank)
-		_ = srv.DB.AddTxn(cctx, ctx.Sess.Userid, "workshop_part", "", itemGUID, 0, -costGold, "gold")
 	} else {
 		if p.Silver < costSilver {
 			ctx.Log.Info("工坊换件：银币不足", "balance", p.Silver, "cost", costSilver)
 			return nil, false
 		}
-		_ = srv.DB.UpdateBalance(cctx, ctx.Sess.Userid, p.Silver-costSilver, p.Gold, p.Bank)
-		_ = srv.DB.AddTxn(cctx, ctx.Sess.Userid, "workshop_part", "", itemGUID, -costSilver, 0, "silver")
 	}
 	// 版本戳必须严格递增，否则客户端会忽略更新后的物品树，工作坊停在转圈状态。
 	bumpCreatedTicks(fields, row.WireClass)
@@ -1342,15 +1518,65 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 			return nil, false
 		}
 	}
-	if err := srv.DB.UpdateItemFields(cctx, row.GUID, fj, row.Qty, row.Durability, row.Workmanship, row.RigGUID); err != nil {
-		return nil, false
+	snapshot.FieldsJSON = fj
+	newDurability := row.Durability
+	if wholeItemRepair {
+		newDurability = 1.0
 	}
-	row.FieldsJSON = fj
-	if def, derr := srv.itemDefForRow(cctx, row); derr == nil && def != nil && def.Category == gearCatReel {
-		if _, perr := srv.syncReelPerformance(cctx, row); perr != nil {
-			ctx.Log.Warn("工坊换件：轮子物理参数保存失败", "guid", shortGUID(row.GUID), "err", perr)
+	var preparedPerf *store.ReelPerformance
+	if isReel {
+		// 本体那一格是轮内零件的综合：换掉烧穿的摩擦片必须能把它抬回来，
+		// 否则“换件修好”永远修不好。先算好新本体和物理参数，再与扣费、
+		// 物品字段写库放进同一个事务，避免任何一步失败留下半套状态。
+		snapshot.Durability = newDurability
+		if body, ok := srv.reelBodyDurabilityInFields(cctx, &snapshot, fields); ok && body > newDurability {
+			newDurability = body
+		}
+		snapshot.Durability = newDurability
+		preparedPerf, perr = srv.buildReelPerformance(cctx, &snapshot)
+		if perr != nil {
+			ctx.Log.Warn("工坊换件：轮子物理参数计算失败", "guid", shortGUID(row.GUID), "err", perr)
+			return nil, false
 		}
 	}
+	tx, terr := beginEconomyTx(cctx, srv.DB)
+	if terr != nil {
+		ctx.Log.Warn("工坊换件：事务启动失败", "guid", shortGUID(row.GUID), "err", terr)
+		return nil, false
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	silverDelta, goldDelta := -costSilver, int64(0)
+	if useGold {
+		silverDelta, goldDelta = 0, -costGold
+	}
+	if err := applyWalletTx(cctx, tx, ctx.Sess.Userid, silverDelta, goldDelta,
+		"workshop_part", "", itemGUID, ""); err != nil {
+		ctx.Log.Warn("工坊换件：扣费失败", "guid", shortGUID(row.GUID), "err", err)
+		return nil, false
+	}
+	if err := srv.DB.UpdateItemFieldsTx(cctx, tx, row.GUID, fj, row.Qty,
+		newDurability, row.Workmanship, row.RigGUID); err != nil {
+		ctx.Log.Warn("工坊换件：物品写库失败", "guid", shortGUID(row.GUID), "err", err)
+		return nil, false
+	}
+	if preparedPerf != nil {
+		if err := srv.DB.UpsertReelPerformanceTx(cctx, tx, *preparedPerf); err != nil {
+			ctx.Log.Warn("工坊换件：轮子物理参数保存失败", "guid", shortGUID(row.GUID), "err", err)
+			return nil, false
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		ctx.Log.Warn("工坊换件：事务提交失败", "guid", shortGUID(row.GUID), "err", err)
+		return nil, false
+	}
+	committed = true
+	row.FieldsJSON = fj
+	row.Durability = newDurability
 	out, terr := srv.ItemToTree(cctx, row)
 	if terr != nil {
 		return nil, false
@@ -1369,7 +1595,7 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 }
 
 // hWorkshopRepair 构造 21/3 银币修理或 21/4 金币修理处理器。
-// 优先使用客户端报价；f3<=0 时按本地公式估算。成功后耐久恢复为 1.0，
+// 服务端价格是结算依据；客户端报价只做容差校验。成功后耐久恢复为 1.0，
 // 并返回重建后的物品树。
 func hWorkshopRepair(useGold bool) Handler {
 	return func(ctx *Ctx) ([]byte, bool) {
@@ -1383,7 +1609,7 @@ func hWorkshopRepair(useGold bool) Handler {
 			return nil, false // 交给兜底链
 		}
 		row, err := srv.DB.GetItemByGUID(cctx, guid)
-		if err != nil || row == nil {
+		if err != nil || row == nil || row.UID != ctx.Sess.Userid {
 			ctx.Log.Info("修理：物品不存在", "guid", shortGUID(guid))
 			return nil, false
 		}
@@ -1401,11 +1627,12 @@ func hWorkshopRepair(useGold bool) Handler {
 			return body, true
 		}
 		wear := 1.0 - row.Durability
-		cost := clientCost
-		mapMult := 1.0
-		if cost <= 0 {
-			mapMult = repairMultiplierForStore(storeID, srv.currentLevel(ctx.Sess.Userid))
-			cost = repairCost(len(slots), useGold, wear, mapMult)
+		mapMult := repairMultiplierForStore(storeID, srv.currentLevel(ctx.Sess.Userid))
+		cost := repairCost(len(slots), useGold, wear, mapMult)
+		if clientCost > 0 && !workshopQuoteMatches(clientCost, cost) {
+			ctx.Log.Warn("修理：客户端报价异常", "guid", shortGUID(guid),
+				"client", clientCost, "server", cost, "gold", useGold)
+			return nil, false
 		}
 		p, perr := srv.DB.EnsureProfile(cctx, ctx.Sess.Userid)
 		if perr != nil {
@@ -1431,20 +1658,81 @@ func hWorkshopRepair(useGold bool) Handler {
 			}
 			return body, true
 		}
-		// 扣费 + 流水
-		if useGold {
-			_ = srv.DB.UpdateBalance(cctx, ctx.Sess.Userid, p.Silver, p.Gold-cost, p.Bank)
-			_ = srv.DB.AddTxn(cctx, ctx.Sess.Userid, "repair", "", guid, 0, -cost, "gold")
-		} else {
-			_ = srv.DB.UpdateBalance(cctx, ctx.Sess.Userid, p.Silver-cost, p.Gold, p.Bank)
-			_ = srv.DB.AddTxn(cctx, ctx.Sess.Userid, "repair", "", guid, -cost, 0, "silver")
-		}
-		// 恢复耐久，保留工艺质量。
+		// 先准备好物品树和轮子物理参数，再开启事务。store.DB 只有一个 SQLite
+		// 连接，事务内不能继续调用依赖 DB 的只读计算方法。
 		beforeDurability := row.Durability
-		if err := srv.DB.SetItemDurability(cctx, guid, 1.0); err != nil {
+		fieldsJSON := row.FieldsJSON
+		snapshot := *row
+		snapshot.Durability = 1.0
+		var preparedPerf *store.ReelPerformance
+		if def, derr := srv.itemDefForRow(cctx, row); derr == nil && def != nil && def.Category == gearCatReel {
+			fields, ferr := FieldsFromJSON(row.FieldsJSON)
+			if ferr != nil {
+				return nil, false
+			}
+			changed, ierr := srv.restoreReelInternalsInFields(cctx, row, fields)
+			if ierr != nil {
+				ctx.Log.Warn("修理：轮内零件恢复失败，本次修理未生效", "guid", shortGUID(guid), "err", ierr)
+				return nil, false
+			}
+			if changed {
+				bumpCreatedTicks(fields, row.WireClass)
+				fieldsJSON, ferr = FieldsToJSON(fields)
+				if ferr != nil {
+					return nil, false
+				}
+				snapshot.FieldsJSON = fieldsJSON
+				if srv.canonicalizeReelStrength(cctx, &snapshot, fields) {
+					fieldsJSON, ferr = FieldsToJSON(fields)
+					if ferr != nil {
+						return nil, false
+					}
+				}
+			}
+			snapshot.FieldsJSON = fieldsJSON
+			preparedPerf, perr = srv.buildReelPerformance(cctx, &snapshot)
+			if perr != nil {
+				ctx.Log.Warn("修理：轮子物理参数计算失败", "guid", shortGUID(row.GUID), "err", perr)
+				return nil, false
+			}
+		}
+		tx, terr := beginEconomyTx(cctx, srv.DB)
+		if terr != nil {
+			ctx.Log.Warn("修理：事务启动失败", "guid", shortGUID(guid), "err", terr)
+			return nil, false
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		silverDelta, goldDelta := -cost, int64(0)
+		if useGold {
+			silverDelta, goldDelta = 0, -cost
+		}
+		if err := applyWalletTx(cctx, tx, ctx.Sess.Userid, silverDelta, goldDelta,
+			"repair", "", guid, ""); err != nil {
+			ctx.Log.Warn("修理：扣费失败", "guid", shortGUID(guid), "err", err)
+			return nil, false
+		}
+		if err := srv.DB.UpdateItemFieldsTx(cctx, tx, guid, fieldsJSON, row.Qty,
+			1.0, row.Workmanship, row.RigGUID); err != nil {
 			ctx.Log.Warn("修理耐久写库失败", "guid", shortGUID(guid), "err", err)
 			return nil, false
 		}
+		if preparedPerf != nil {
+			if err := srv.DB.UpsertReelPerformanceTx(cctx, tx, *preparedPerf); err != nil {
+				ctx.Log.Warn("修理：轮子物理参数保存失败", "guid", shortGUID(row.GUID), "err", err)
+				return nil, false
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			ctx.Log.Warn("修理：事务提交失败", "guid", shortGUID(guid), "err", err)
+			return nil, false
+		}
+		committed = true
+		row.FieldsJSON = fieldsJSON
 		row.Durability = 1.0
 		if err := srv.DB.AddItemDamageLog(cctx, store.ItemDamageLog{
 			UID: ctx.Sess.Userid, ItemGUID: guid, ItemID: row.ItemID, Event: damageEventRepair,
@@ -1645,6 +1933,12 @@ func hRodSetDrag(ctx *Ctx) ([]byte, bool) {
 	if srv.DB != nil && !srv.setOwnedRodSetting(ctx.Sess.pushCtx(), ctx.Sess.Userid,
 		rodGUID, reelDragSettingKey, value, 6) {
 		ctx.Log.Warn("17/14 竿不属于当前玩家，已忽略", "竿", shortGUID(rodGUID))
+	}
+	// 摩擦档位变了：本竿缓存的泄力/锁轮承力必须重取，当前锁轮过载段也从头重新爬升。
+	if st := srv.fishingStateForRod(ctx.Sess.Userid, rodGUID); st != nil {
+		st.mu.Lock()
+		st.reelWear.invalidate()
+		st.mu.Unlock()
 	}
 	return nil, true
 }

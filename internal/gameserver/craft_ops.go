@@ -343,6 +343,119 @@ func allDemandsExplicit(ms []craftDemand) bool {
 	return true
 }
 
+// ---- 鱼护渔获当制作材料 ----
+
+// slotsByDemand 把客户端材料槽按需求 id 归组。鱼类加工配方（蟹肉、鱼片、活饵、
+// 死鱼饵、熏鱼等）的槽位里拖的就是鱼护条目：f0 是需求 id，f1 是鱼护 echo guid。
+func slotsByDemand(slots []craftSlot) map[string][]craftSlot {
+	out := map[string][]craftSlot{}
+	for _, sl := range slots {
+		if sl.ItemID == "" {
+			continue
+		}
+		out[sl.ItemID] = append(out[sl.ItemID], sl)
+	}
+	return out
+}
+
+// keepnetAccepted 返回需求可接受的鱼种集合。鱼类配方的 alternatives 填的就是
+// 鱼种 id（如 craft_bait_from_crab → ["rk_crab","ed_crab"]），这些 id 在 item_def
+// 里没有定义，只能按 keepnet_items.species 匹配。
+func keepnetAccepted(demand craftDemand) map[string]bool {
+	accept := map[string]bool{}
+	for _, id := range demandAccepts(demand) {
+		if id != "" {
+			accept[id] = true
+		}
+	}
+	return accept
+}
+
+// consumeKeepnetEntryTx 事务内消费一条鱼护渔获（删除条目 + 清理镜像行/槽位，
+// 与标本挂鱼同一语义，直接复用 consumeMountedFishTx 以免两处漂移）。
+// 返回 false 表示该条目已不存在——并发下被别人先消费，调用方应跳过而不是报错。
+func (s *Server) consumeKeepnetEntryTx(ctx context.Context, tx *sql.Tx, uid int64, guid string) (bool, error) {
+	deleted, err := s.DB.DeleteKeepnetTx(ctx, tx, uid, guid)
+	if err != nil || !deleted {
+		return false, err
+	}
+	// 已经删掉了鱼护条目；镜像行清理失败同样要整体回滚，否则留下幽灵行。
+	if _, err := tx.ExecContext(ctx, `DELETE FROM item WHERE uid=? AND guid=?`, uid, guid); err != nil {
+		return true, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM container_slot WHERE guid=?`, guid); err != nil {
+		return true, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rig_component WHERE guid=?`, guid); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// consumeKeepnetForDemandTx 事务内按鱼种从鱼护扣减需求份数，每条鱼护条目算一份。
+// preferred 里的 echo guid（客户端材料槽明确选中的那一尾）优先消费，其余按鱼护
+// 时间顺序补齐。返回实际消耗的条目；凑不够时返回已扣部分，由调用方决定整体失败
+// ——经济事务回滚则鱼不陪葬，提交则鱼必被消费（恰好一次）。
+func (s *Server) consumeKeepnetForDemandTx(ctx context.Context, tx *sql.Tx, uid int64,
+	demand craftDemand, need int64, preferred map[string]bool) ([]*store.KeepnetEntry, error) {
+	if need <= 0 {
+		return nil, nil
+	}
+	accept := keepnetAccepted(demand)
+	if len(accept) == 0 {
+		return nil, nil
+	}
+	entries, err := s.DB.KeepnetListTx(ctx, tx, uid)
+	if err != nil {
+		return nil, err
+	}
+	// 先放玩家明确选中的那几条，再按鱼护时间顺序补；KeepnetListTx 已按 uid 过滤，
+	// 因此别人的鱼护条目不参与匹配。
+	ordered := make([]*store.KeepnetEntry, 0, len(entries))
+	for _, e := range entries {
+		if preferred[e.EchoGUID] && accept[e.Species] {
+			ordered = append(ordered, e)
+		}
+	}
+	for _, e := range entries {
+		if preferred[e.EchoGUID] && accept[e.Species] {
+			continue
+		}
+		ordered = append(ordered, e)
+	}
+	var consumed []*store.KeepnetEntry
+	for _, e := range ordered {
+		if int64(len(consumed)) >= need {
+			break
+		}
+		if !accept[e.Species] {
+			continue
+		}
+		ok, derr := s.consumeKeepnetEntryTx(ctx, tx, uid, e.EchoGUID)
+		if derr != nil {
+			return consumed, derr
+		}
+		if !ok {
+			// 并发下已被别人消费：当作这条不存在，继续找下一条。
+			continue
+		}
+		consumed = append(consumed, e)
+	}
+	return consumed, nil
+}
+
+// preferredKeepnet 从材料槽里挑出指向某需求的 echo guid 集合，用于让"玩家明确
+// 拖进来的那一尾鱼"优先被消费，而不是按时间顺序从鱼护头开始扣。
+func preferredKeepnet(slots []craftSlot, demandID string) map[string]bool {
+	out := map[string]bool{}
+	for _, sl := range slots {
+		if sl.ItemID == demandID && sl.GUID != "" {
+			out[sl.GUID] = true
+		}
+	}
+	return out
+}
+
 // scaleDemands 按制作份数放大材料需求；times 为 1 时原样返回。
 // 乘法溢出时返回 ok=false，避免异常份数绕过材料校验。
 func scaleDemands(ms []craftDemand, times int64) ([]craftDemand, bool) {
@@ -484,6 +597,9 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	// usedMats 记下本次真的扣掉了哪些原料 item_id（不是槽里的需求 id）。
 	// 自制窝料的产物没有独立 item_id，只能按实例把用料记下来。
 	usedMats := []string{}
+	// keepnetTaken 记下本次从鱼护里吃掉的渔获 echo guid。它们不在 item 表里，
+	// 需要单独走 4/21 物品移除信号，客户端才会把鱼护界面里的原鱼撤下。
+	keepnetTaken := []string{}
 	var leaderMaterials craftedLeaderMaterials
 	fail := func(reason string, args ...any) ([]byte, bool) {
 		ctx.Log.Warn("9/1 制作失败："+reason, args...)
@@ -530,6 +646,24 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 						if !containsGUID(touched, it.GUID) {
 							touched = append(touched, it.GUID)
 						}
+					}
+				}
+			}
+			// 背包/钓组里没有，回落到鱼护：鱼类加工配方的材料是渔获（蟹、鱼、蚌），
+			// 它们只存在于 keepnet_items，item_def 里根本没有定义。
+			if remaining > 0 {
+				taken, kerr := srv.consumeKeepnetForDemandTx(cctx, tx, uid, demand, remaining,
+					preferredKeepnet(req.Materials, demand.DemandID))
+				if kerr != nil {
+					return fail("扣渔获失败", "demand", demand.DemandID, "err", kerr)
+				}
+				for _, e := range taken {
+					remaining--
+					// 记真实鱼种（ed_crab），不是槽里的需求 id（fish_crab）。
+					usedMats = appendMaterialUses(usedMats, e.Species, 1)
+					keepnetTaken = append(keepnetTaken, e.EchoGUID)
+					if !containsGUID(touched, e.EchoGUID) {
+						touched = append(touched, e.EchoGUID)
 					}
 				}
 			}
@@ -753,10 +887,23 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 			// （与卖鱼/移动物品同一信号，见 boat.go / hItemRemove）。
 			ctx.Sess.Push(4, 21, proto.Args524(proto.GuidArr([]string{mounted.EchoGUID})))
 		}
+		if len(keepnetTaken) > 0 {
+			// 鱼类加工把渔获当材料吃掉，同样按 4/21 通知鱼护界面移除这些条目。
+			ctx.Sess.Push(4, 21, proto.Args524(proto.GuidArr(keepnetTaken)))
+		}
 		if stackTree != nil {
 			// 4/22 是背包快照，必须下发合并后的整堆数量。
 			ctx.Sess.Push(4, 22, proto.Args(proto.S("61"), stackTree))
 		}
+	})
+	// 制作成功事件：配方 ID 供 250-417 的制作类成就判断；烹饪熟练度只在
+	// 本次是烹饪配方时装配，非烹饪制作保持 0，技能类成就便不会误判。
+	cookPoints := float64(0)
+	if skillCat == craftCookSkillID {
+		cookPoints, _ = srv.DB.GetSkillPoints(cctx, uid, craftCookSkillID)
+	}
+	srv.evaluateAchievements(ctx, achievementEvent{
+		Kind: evCraftOK, RecipeID: recipe.RecipeID, CookPoints: cookPoints,
 	})
 	return srv.replyCraftResultWithSkill(ctx, true, produced, upsert, removed, progress, skillTree)
 }
@@ -1116,12 +1263,28 @@ func (s *Server) digBaitWithShovel(ctx *Ctx, shovel *store.Item) ([]byte, bool) 
 		prepared = append(prepared, it)
 	}
 
+	// 体力参数必须在开经济事务之前取好（tunableF 首次装载有 2 秒查询超时）。
+	condParams := s.conditionParamsForUID(cctx, ctx.Sess.Userid)
+	condCost := s.baitDigEnergyCost()
+
 	tx, err := beginEconomyTx(cctx, s.DB)
 	if err != nil {
 		ctx.Log.Warn("9/3 挖饵开启事务失败", "err", err)
 		return s.replyCraftResult(ctx, false, nil, nil, nil)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// 与饵入包同事务：体力不足直接回滚，不会出现"给了饵没扣体力"。
+	spent, err := spendEnergyTx(cctx, tx, ctx.Sess.Userid, condParams, condCost)
+	if err != nil {
+		if errors.Is(err, errEnergyNotEnough) {
+			ctx.Log.Info("9/3 铲子挖饵被拒：精力不足", "shovel", shortGUID(shovel.GUID),
+				"cost", condCost, "enabled", condParams.Enabled)
+		} else {
+			ctx.Log.Warn("9/3 挖饵精力结算失败", "err", err)
+		}
+		return s.replyCraftResult(ctx, false, nil, nil, nil)
+	}
 
 	granted := make([]*store.Item, 0, len(prepared))
 	parts := make([]string, 0, len(loot))
@@ -1165,7 +1328,11 @@ func (s *Server) digBaitWithShovel(ctx *Ctx, shovel *store.Item) ([]byte, bool) 
 	})
 	skillTree := s.buildSingleSkill312(cctx, ctx.Sess.Userid, baitCatchSkillCat)
 	ctx.Log.Info("9/3 铲子挖饵", "shovel", shortGUID(shovel.GUID), "types", len(loot),
-		"items", strings.Join(parts, ","), "skill_gain", skillGain)
+		"items", strings.Join(parts, ","), "skill_gain", skillGain, "energy_spent", spent)
+	if spent > 0 {
+		// 体力条不在 9/3 应答里，扣完立刻补推一条 2/2。
+		ctx.AfterResponse(func() { pushKeepalive(ctx.Sess) })
+	}
 	return s.replyCraftResultWithSkill(ctx, true, produced, produced, nil, progress, skillTree)
 }
 

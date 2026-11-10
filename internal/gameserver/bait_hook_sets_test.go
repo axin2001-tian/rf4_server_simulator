@@ -16,6 +16,7 @@ func mountHookForBaitTest(t *testing.T, s *Server, rod string, ordinal int64) st
 }
 
 func TestBaitedHookSingleCombinationAndSelectedSpec(t *testing.T) {
+	t.Parallel()
 	s, db := newRigTestServer(t)
 	rod := baitTestRod(t, s)
 	hook := mountHookForBaitTest(t, s, rod, 0)
@@ -26,7 +27,8 @@ func TestBaitedHookSingleCombinationAndSelectedSpec(t *testing.T) {
 		t.Fatalf("single-hook combination = %+v", groups)
 	}
 	spec := gearPhysicsSpec{HookSize: 999}
-	if !s.applyBaitedHookSpec(t.Context(), groups[0], &spec) || !spec.HookPresent || spec.HookSize == 999 || spec.HookStrengthKg <= 0 {
+	if !s.applyBaitedHookSpec(t.Context(), groups[0], &spec) || !spec.HookPresent ||
+		spec.HookItemID != "c_hook_20712" || spec.HookSize == 999 || spec.HookStrengthKg <= 0 {
 		t.Fatalf("selected hook spec = %+v", spec)
 	}
 	if change, err := s.consumeBaitEvent(t.Context(), 1000001, rod, "single-combination", groups[0].baitGUIDs, false); err != nil || len(change.Removed) != 2 {
@@ -47,6 +49,7 @@ func TestBaitedHookSingleCombinationAndSelectedSpec(t *testing.T) {
 }
 
 func TestBaitedHookUsesEmbeddedLureHookDefinition(t *testing.T) {
+	t.Parallel()
 	s, _ := newRigTestServer(t)
 	rod, err := s.CreateItem(t.Context(), 1000001, "spin_10001_S60MH", "backpack", 1)
 	if err != nil {
@@ -64,6 +67,7 @@ func TestBaitedHookUsesEmbeddedLureHookDefinition(t *testing.T) {
 }
 
 func TestBaitedHookConsumptionPreservesOtherHooksAfterCompactionAndRestart(t *testing.T) {
+	t.Parallel()
 	s, db := newRigTestServer(t)
 	rod, err := s.CreateItem(t.Context(), 1000001, "boatr_10222_SBH80_100", "backpack", 1)
 	if err != nil {
@@ -121,6 +125,7 @@ func TestBaitedHookConsumptionPreservesOtherHooksAfterCompactionAndRestart(t *te
 }
 
 func TestOrderBaitsByHookSyncsRigComponentOrdinals(t *testing.T) {
+	t.Parallel()
 	s, db := newRigTestServer(t)
 	rod, _, groups := selectedHookMarineRig(t, s, []string{"worm_01", "muckworm", "fly"})
 	for i, group := range groups {

@@ -9,29 +9,44 @@ import (
 	"rf4server/internal/proto"
 )
 
-// TestFishLandedKVText 上鱼播报 KV 文案：三档键1 都只放中文鱼名、键2 放
-// 重量克，前缀由客户端本地化模板补（达标 kind3 无前缀）。
+// TestFishLandedKVText 上鱼播报 KV 文案：键1 为中文鱼名、键2 为重量克，
+// 档位前缀由客户端本地化模板补（达标 kind3 无前缀）。
 func TestFishLandedKVText(t *testing.T) {
-	srv := NewServer(config.Game{}, logging.Discard(), nil)
-	sess := newProbeSess(srv)
-	table := sess.Table()
-	f := &RolledFish{Species: "g_tench", Grade: 2, WeightG: 425}
-
-	enc := func(kind int) []byte {
-		b, err := proto.EncodeValue(srv.fishLandedKV(f, kind), table)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
+	srv, db := newDetachTestServer(t)
+	if _, err := db.SQL.Exec(`INSERT INTO loc_wiki_fish(loc,fish_key,fish_zh)
+		VALUES('broadcast-test','g_tench','丁鱵')`); err != nil {
+		t.Fatal(err)
 	}
-	for _, kind := range []int{25, 26, 3} {
-		if b := enc(kind); bytes.Contains(b, []byte("钓获")) {
-			t.Fatalf("kind=%d 不应自带前缀: %x", kind, b)
-		}
+	sess := newProbeSess(srv)
+	b, err := proto.EncodeValue(srv.fishLandedKV(&RolledFish{Species: "g_tench", WeightG: 425}), sess.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("丁鱵")) || bytes.Contains(b, []byte("g_tench")) {
+		t.Fatalf("键1 应为中文鱼名而非鱼种 key: %x", b)
 	}
 	// 重量 425g 原样进键2（客户端按克/公斤显示）。
-	if b := enc(3); !bytes.Contains(b, []byte{0xa9, 0x01, 0x00, 0x00}) {
+	if !bytes.Contains(b, []byte{0xa9, 0x01, 0x00, 0x00}) {
 		t.Fatalf("键2 重量应为 425 克: %x", b)
+	}
+	// 长度前缀必须是 UTF-8 字节数，而不是字符数。
+	name := []byte("丁鱵")
+	if prefix := append([]byte{0x01, 0x14, byte(len(name))}, name...); !bytes.Contains(b, prefix) {
+		t.Fatalf("键1 UTF-8 长度前缀不符: %x", b)
+	}
+}
+
+// 没有中文名时，键1 回退到鱼种 key。
+func TestFishLandedKVFallbackUsesSpeciesKey(t *testing.T) {
+	srv, _ := newDetachTestServer(t)
+	sess := newProbeSess(srv)
+	b, err := proto.EncodeValue(srv.fishLandedKV(&RolledFish{Species: "missing_species", WeightG: 425}), sess.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("missing_species")
+	if prefix := append([]byte{0x01, 0x14, byte(len(key))}, key...); !bytes.Contains(b, prefix) {
+		t.Fatalf("回退 key 长度前缀不符: %x", b)
 	}
 }
 

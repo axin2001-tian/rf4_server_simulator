@@ -36,7 +36,6 @@ func TestFishLandedUsesGradeKind(t *testing.T) {
 	srv.tunCache = map[string]float64{"fish_tv_kv": 1}
 	srv.tunAt = time.Now()
 	srv.tunMu.Unlock()
-
 	for _, tc := range []struct {
 		grade int64
 		kind  uint64

@@ -165,6 +165,12 @@ func hMailSendMessage(ctx *Ctx) ([]byte, bool) {
 	if len(texts) > 0 {
 		text = texts[0]
 	}
+	if toUID == fishQueryContactUID {
+		return srv.receiveFishQuery(ctx, text)
+	}
+	if toUID == gearAssistantUID {
+		return srv.receiveGearAssistant(ctx, text)
+	}
 	if toUID > 0 && toUID != ctx.Sess.Userid {
 		cctx := ctx.Sess.pushCtx()
 		tx, err := beginEconomyTx(cctx, srv.DB)
@@ -345,7 +351,7 @@ func hMailSendItem(ctx *Ctx) ([]byte, bool) {
 	if len(ints) > 1 {
 		count = int64(ints[1])
 	}
-	if toUID <= 0 || toUID == uid || guids[0] == "" {
+	if toUID <= 0 || toUID == uid || isVirtualContact(toUID) || guids[0] == "" {
 		body, _ := proto.EncodeValue(out, ctx.Sess.Table())
 		return body, true
 	}
@@ -490,9 +496,32 @@ func (s *Server) acceptMails(ctx *Ctx, ids []int64) (int, []*store.Item) {
 					return 0, nil
 				}
 				if def.Category == bundleCategory {
-					if att.BuyPrice != 0 {
+					openable := bundleOpenable(def)
+					if att.BuyPrice != 0 && !openable {
 						ctx.Log.Warn("19/3 组合包有购买价值，需人工处理", "mail", id, "item", att.ItemID)
 						return 0, nil
+					}
+					if openable {
+						// 礼盒附件以本体发放，一包一件（非计件）；玩家 4/8
+						// 使用时拆开。饵料盒维持展开发放。
+						packs := att.Qty
+						if packs < 1 {
+							packs = 1
+						}
+						if packs > maxBundlePreparedItems {
+							ctx.Log.Warn("19/3 礼盒附件数量超过上限", "mail", id,
+								"item", att.ItemID, "qty", packs, "limit", maxBundlePreparedItems)
+							return 0, nil
+						}
+						for i := int64(0); i < packs; i++ {
+							it, berr := s.prepareNewItem(cctx, uid, att.ItemID, "backpack", 1, "")
+							if berr != nil {
+								ctx.Log.Warn("19/3 礼盒附件构造失败", "mail", id, "item", att.ItemID, "err", berr)
+								return 0, nil
+							}
+							plan.prepared = append(plan.prepared, it)
+						}
+						continue
 					}
 					items, berr := s.prepareBundleItems(cctx, uid, att.ItemID, "backpack", att.Qty)
 					if berr != nil {
@@ -698,17 +727,19 @@ type AdminCommand struct {
 	GUIDs        []string            `json:"guids,omitempty"`
 	Keepnet      *store.KeepnetEntry `json:"keepnet,omitempty"`
 	KeepnetGUIDs []string            `json:"keepnet_guids,omitempty"`
-	Species      string              `json:"species,omitempty"`  // arm_fish：鱼种（空=默认池随机）
-	WeightG      int64               `json:"weight_g,omitempty"` // arm_fish：克重（空=默认池范围内）
-	Grade        int64               `json:"grade,omitempty"`    // 兼容旧指令；实际档位按结算尺和重量计算。
-	Channel      int64               `json:"channel,omitempty"`  // fish_tv_test：聊天推送通道 24..31
-	Kind         int64               `json:"kind,omitempty"`     // fish_tv_test：401.f0 消息类型；负值为参数位探测
-	KVShape      int64               `json:"kv_shape,omitempty"` // fish_tv_test：401.f4 模板 KV 形状或外层参数探测编号
-	X            float64             `json:"x,omitempty"`        // teleport：世界坐标 X
-	Z            float64             `json:"z,omitempty"`        // teleport：世界坐标 Z
-	Loc          string              `json:"loc,omitempty"`      // teleport：可选场景 loc
-	Spot         uint64              `json:"spot,omitempty"`     // teleport：可选钓点序号
-	HoldSec      int64               `json:"hold_sec,omitempty"` // teleport：坐标保护秒数，默认 600
+	Species      string              `json:"species,omitempty"`     // arm_fish：鱼种（空=默认池随机）
+	WeightG      int64               `json:"weight_g,omitempty"`    // arm_fish：克重（空=默认池范围内）
+	Grade        int64               `json:"grade,omitempty"`       // 兼容旧指令；实际档位按结算尺和重量计算。
+	Channel      int64               `json:"channel,omitempty"`     // fish_tv_test：聊天推送通道 24..31
+	Kind         int64               `json:"kind,omitempty"`        // fish_tv_test：401.f0 消息类型；负值为参数位探测
+	KVShape      int64               `json:"kv_shape,omitempty"`    // fish_tv_test：401.f4 模板 KV 形状或外层参数探测编号
+	AchID        int64               `json:"ach_id,omitempty"`      // achievement_push_test：成就 id
+	NotifyType   int64               `json:"notify_type,omitempty"` // achievement_push_test：2/9 的 306.f0 取值
+	X            float64             `json:"x,omitempty"`           // teleport：世界坐标 X
+	Z            float64             `json:"z,omitempty"`           // teleport：世界坐标 Z
+	Loc          string              `json:"loc,omitempty"`         // teleport：可选场景 loc
+	Spot         uint64              `json:"spot,omitempty"`        // teleport：可选钓点序号
+	HoldSec      int64               `json:"hold_sec,omitempty"`    // teleport：坐标保护秒数，默认 600
 }
 
 // StartAdminSubscriber 轮询共享 SQLite 队列，每 2 秒处理一批管理指令。
@@ -890,7 +921,13 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 		if err := s.reloadFishEcologyCache(s.dbCtx()); err != nil {
 			s.log.Warn("鱼种生态缓存刷新失败", "err", err)
 		}
+		if err := s.reloadHookBiteProfiles(s.dbCtx()); err != nil {
+			s.log.Warn("鱼钩型号咬口缓存刷新失败", "err", err)
+		}
 		s.log.Info("管理指令：运行参数已刷新")
+	case "reload_bait_rules":
+		s.invalidateBaitOverrides()
+		s.log.Info("管理指令：鱼饵规则覆盖已刷新")
 	case "fish_tv_test":
 		// 鱼汛通道探测：向指定玩家（0=全部在线会话）推送一条测试消息。
 		var targets []*Session
@@ -925,6 +962,36 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 		}
 		s.log.Info("管理指令：鱼汛通道测试", "uid", cmd.UID,
 			"channel", cmd.Channel, "kind", cmd.Kind, "kv_shape", cmd.KVShape, "targets", len(targets))
+	case "achievement_push_test":
+		// 成就解锁弹窗探测：向指定玩家（0=全部在线）发一种候选推送。
+		variant := cmd.Text
+		if variant == "" {
+			variant = "3_3"
+		}
+		achID := cmd.AchID
+		if achID == 0 {
+			achID = 101
+		}
+		var targets []*Session
+		if cmd.UID != 0 {
+			targets = s.sessionsForUID(cmd.UID)
+		} else {
+			s.mu.Lock()
+			for _, sess := range s.sessions {
+				if sess != nil && !sess.Closed() {
+					targets = append(targets, sess)
+				}
+			}
+			s.mu.Unlock()
+		}
+		sent := 0
+		for _, sess := range targets {
+			if sess.pushAchievementProbe(variant, achID, cmd.NotifyType) {
+				sent++
+			}
+		}
+		s.log.Info("管理指令：成就推送探针", "uid", cmd.UID, "variant", variant,
+			"ach_id", achID, "notify_type", cmd.NotifyType, "targets", len(targets), "sent", sent)
 	case "refresh_player":
 		for _, sess := range s.sessionsForUID(cmd.UID) {
 			sess.Push2_1()

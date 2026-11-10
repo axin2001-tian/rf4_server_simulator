@@ -106,13 +106,15 @@ func assertReelSnapshot(t *testing.T, srv *Server, guid, gearID string, drag flo
 
 func snapshotWorkshopRequest(guid, id string) *proto.Value {
 	return proto.Args524(proto.StrVal("workshop_01"), wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{
-		0: proto.Guid(guid), 1: proto.Args(proto.S("503"), wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{0: proto.U32(52), 1: proto.StrVal(id)})), 2: proto.U32(0), 3: proto.U64(100)}))
+		0: proto.Guid(guid), 1: proto.Args(proto.S("503"), wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{0: proto.U32(52), 1: proto.StrVal(id)})), 2: proto.U32(0), 3: proto.U64(0)}))
 }
 
 func TestReelPartSnapshotWorkshop(t *testing.T) {
+	t.Parallel()
 	for _, drag := range []float64{2.25, 0} {
 		t.Run(fmt.Sprintf("drag_%g", drag), func(t *testing.T) {
-			srv, db := newRigTestServer(t)
+			t.Parallel()
+			srv, db := newStaticRigTestServer(t)
 			defer db.Close()
 			ctx := t.Context()
 			const uid = int64(1000001)
@@ -170,8 +172,14 @@ func TestReelPartSnapshotWorkshop(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if balanceBefore.Silver-balanceAfter.Silver != 100 {
-					t.Fatal("workshop charge changed")
+				partDef, err := db.GetItemDefByItemID(ctx, id)
+				if err != nil || partDef == nil {
+					t.Fatalf("读取零件定义失败: %v", err)
+				}
+				wantSilver, _ := srv.partPrice(ctx, id, partDef.Category)
+				if balanceBefore.Silver-balanceAfter.Silver != wantSilver {
+					t.Fatalf("工坊扣费=%d，期望服务端价格=%d",
+						balanceBefore.Silver-balanceAfter.Silver, wantSilver)
 				}
 				fresh := assertReelSnapshot(t, srv, reel.GUID, id, drag)
 				reply, _, err := proto.DecodeValue(body, 0, srv.Table())
@@ -213,13 +221,23 @@ func TestReelPartSnapshotWorkshop(t *testing.T) {
 				}
 				previousRatio = ratio
 			}
-			// Same-model gear repair restores only the installed gear's durability.
+			// Same-model repair is a full reel service, not a single-part patch.
 			fresh := mustItem(t, db, reel.GUID)
 			fs := snapshotFields(t, fresh.FieldsJSON)
 			gear, _ := snapshotPart(t, srv, fs, 52)
 			setWireFloat(gear.Fields, gear.Class, fieldIdxByCS(gear.Class, csDurability), .4)
+			bearing, _ := snapshotPart(t, srv, fs, 7)
+			setWireFloat(bearing.Fields, bearing.Class, fieldIdxByCS(bearing.Class, csDurability), .4)
+			washer, washerDef := snapshotPart(t, srv, fs, 9)
+			setWireFloat(washer.Fields, washer.Class, fieldIdxByCS(washer.Class, csDurability), .4)
+			if _, present, idx := frictionWasherDrag(washer); present {
+				setWireFloat(washer.Fields, washer.Class, idx, itemDefF32(washerDef, gearAttrDragMax)*fresh.Workmanship*.4)
+			}
 			raw = snapshotJSON(t, fs)
 			if err := db.UpdateItemFields(ctx, fresh.GUID, raw, fresh.Qty, fresh.Durability, fresh.Workmanship, fresh.RigGUID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetItemDurability(ctx, reel.GUID, .6); err != nil {
 				t.Fatal(err)
 			}
 			c := &Ctx{Sess: newProbeSess(srv), Tree: snapshotWorkshopRequest(reel.GUID, "rgm_ef_spark10021"), Log: logging.Discard()}
@@ -238,16 +256,32 @@ func TestReelPartSnapshotWorkshop(t *testing.T) {
 			if repairedDef.ItemID != "rgm_ef_spark10021" {
 				t.Fatal("gear repair response model")
 			}
-			fresh = assertReelSnapshot(t, srv, reel.GUID, "rgm_ef_spark10021", drag)
+			fresh = assertReelSnapshot(t, srv, reel.GUID, "rgm_ef_spark10021",
+				itemDefF32(washerDef, gearAttrDragMax)*fresh.Workmanship)
+			if fresh.Durability != 1 {
+				t.Fatalf("same-model repair should restore body durability, got %v", fresh.Durability)
+			}
 			fs = snapshotFields(t, fresh.FieldsJSON)
 			gear, _ = snapshotPart(t, srv, fs, 52)
 			if snapshotFloat(gear.Fields, gear.Class, csDurability) != 1 {
 				t.Fatal("gear not repaired")
 			}
+			bearing, _ = snapshotPart(t, srv, fs, 7)
+			if snapshotFloat(bearing.Fields, bearing.Class, csDurability) != 1 {
+				t.Fatal("bearing should be repaired with the reel")
+			}
+			washer, washerDef = snapshotPart(t, srv, fs, 9)
+			if snapshotFloat(washer.Fields, washer.Class, csDurability) != 1 {
+				t.Fatal("friction washer durability should be restored with the reel")
+			}
+			if current, present, _ := frictionWasherDrag(washer); !present ||
+				math.Abs(current-itemDefF32(washerDef, gearAttrDragMax)*fresh.Workmanship) > 1e-6 {
+				t.Fatalf("friction washer drag should be restored, got %v", current)
+			}
 			if err := db.SetItemDurability(ctx, reel.GUID, .6); err != nil {
 				t.Fatal(err)
 			}
-			repair := proto.Args524(proto.StrVal("workshop_01"), wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{0: proto.Guid(reel.GUID), 1: proto.Args524(proto.U32(52)), 2: proto.U32(0), 3: proto.U64(100)}))
+			repair := proto.Args524(proto.StrVal("workshop_01"), wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{0: proto.Guid(reel.GUID), 1: proto.Args524(proto.U32(52)), 2: proto.U32(0), 3: proto.U64(0)}))
 			c = &Ctx{Sess: newProbeSess(srv), Tree: repair, Log: logging.Discard()}
 			repairBody, repaired := hWorkshopRepair(false)(c)
 			if !repaired {
@@ -260,15 +294,27 @@ func TestReelPartSnapshotWorkshop(t *testing.T) {
 			if snapshotFloat(repairTree.Fields, repairTree.Class, csDurability) != 1 {
 				t.Fatal("reel repair response durability")
 			}
-			assertReelSnapshot(t, srv, reel.GUID, "rgm_ef_spark10021", drag)
+			// 进店修理是整机大保养：轮内烧掉、磨旧的件一并恢复，否则本体修回 1.0
+			// 也收不了线。所以修完之后根受力回到当前安装摩擦片的额定值。
+			repairedRow := mustItem(t, db, reel.GUID)
+			ratedDrag, ratedOK := srv.reelWasherRatedFromRow(ctx, repairedRow)
+			if !ratedOK || ratedDrag <= 0 {
+				t.Fatal("installed washer rated drag after repair")
+			}
+			if repairedRow.Durability != 1 {
+				t.Fatalf("reel durability after repair=%v", repairedRow.Durability)
+			}
+			assertReelSnapshot(t, srv, reel.GUID, "rgm_ef_spark10021", ratedDrag)
 		})
 	}
 }
 
 func TestReelPartSnapshotStartup(t *testing.T) {
+	t.Parallel()
 	for _, drag := range []float64{2.25, 0} {
 		t.Run(fmt.Sprintf("drag_%g", drag), func(t *testing.T) {
-			srv, db := newRigTestServer(t)
+			t.Parallel()
+			srv, db := newStaticRigTestServer(t)
 			defer db.Close()
 			ctx := t.Context()
 			reel, err := srv.CreateItem(ctx, 1000001, "spin_5354", "backpack", 1)
@@ -304,11 +350,7 @@ func TestReelPartSnapshotStartup(t *testing.T) {
 					if err := db.Close(); err != nil {
 						t.Fatal(err)
 					}
-					db, err = store.Open(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					t.Cleanup(func() { _ = db.Close() })
+					db = openStaticDBAtPath(t, path)
 					srv = NewServer(srv.cfg, logging.Discard(), nil)
 					srv.SetDB(db)
 				}
@@ -344,9 +386,11 @@ func TestReelPartSnapshotStartup(t *testing.T) {
 }
 
 func TestReelPartSnapshotBatchAndUnrelatedParts(t *testing.T) {
+	t.Parallel()
 	for _, drag := range []float64{2.25, 0} {
 		t.Run(fmt.Sprintf("drag_%g", drag), func(t *testing.T) {
-			srv, db := newRigTestServer(t)
+			t.Parallel()
+			srv, db := newStaticRigTestServer(t)
 			defer db.Close()
 			ctx := t.Context()
 			const uid = int64(1000001)
@@ -427,7 +471,7 @@ func TestReelPartSnapshotBatchAndUnrelatedParts(t *testing.T) {
 				wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{0: proto.U32(9), 1: proto.StrVal("ef-fb-sp.orig-5805")}),
 				wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{0: proto.U32(52), 1: proto.StrVal("rgm_ef_spark10021")}),
 			)
-			request = proto.Args524(proto.StrVal("workshop_01"), wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{0: proto.Guid(reel.GUID), 1: orders, 2: proto.U32(0), 3: proto.U64(100)}))
+			request = proto.Args524(proto.StrVal("workshop_01"), wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{0: proto.Guid(reel.GUID), 1: orders, 2: proto.U32(0), 3: proto.U64(0)}))
 			requestBytes, err := proto.EncodeValue(request, srv.Table())
 			if err != nil {
 				t.Fatal(err)
@@ -486,9 +530,11 @@ func TestReelPartSnapshotBatchAndUnrelatedParts(t *testing.T) {
 }
 
 func TestReelZeroDragRootPaths(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"tree", "repair", "workshop"} {
 		t.Run(path, func(t *testing.T) {
-			srv, db := newRigTestServer(t)
+			t.Parallel()
+			srv, db := newStaticRigTestServer(t)
 			defer db.Close()
 			ctx := t.Context()
 			const uid = int64(1000001)
@@ -548,6 +594,7 @@ func TestReelZeroDragRootPaths(t *testing.T) {
 }
 
 func TestReelDragFieldPresenceAndFallback(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		value   float64
@@ -557,7 +604,8 @@ func TestReelDragFieldPresenceAndFallback(t *testing.T) {
 		{"positive", 2.25, true, 2.25}, {"zero", 0, true, 0}, {"missing", 0, false, 3.5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, db := newRigTestServer(t)
+			t.Parallel()
+			srv, db := newStaticRigTestServer(t)
 			defer db.Close()
 			ctx := t.Context()
 			row, err := srv.CreateItem(ctx, 1000001, "spin_5354", "backpack", 1)
@@ -622,10 +670,12 @@ func TestReelDragFieldPresenceAndFallback(t *testing.T) {
 }
 
 func TestReelDegradePersistsRoot(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"degrade", "slip"} {
 		for _, wearOut := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/worn_%t", path, wearOut), func(t *testing.T) {
-				srv, db := newRigTestServer(t)
+				t.Parallel()
+				srv, db := newStaticRigTestServer(t)
 				defer db.Close()
 				ctx := t.Context()
 				const uid = int64(1000001)
@@ -671,6 +721,10 @@ func TestReelDegradePersistsRoot(t *testing.T) {
 				afterWasher, _ := snapshotPart(t, srv, fields, 9)
 				unchanged := append([]proto.Field(nil), afterWasher.Fields...)
 				setWireFloat(unchanged, afterWasher.Class, fieldIdxByCS(afterWasher.Class, csDragForce), current)
+				// 磨损还会把摩擦片耐久写成制动力剩余比例的镜像（背包与工坊靠它看损耗%），
+				// 比对时一并还原，确认其余身份字段没被动过。
+				setWireFloat(unchanged, afterWasher.Class, fieldIdxByCS(afterWasher.Class, csDurability),
+					snapshotFloat(washer.Fields, washer.Class, csDurability))
 				if snapshotJSON(t, unchanged) != washerBefore {
 					t.Fatal("wear changed washer identity, condition or other fields")
 				}
@@ -705,8 +759,18 @@ func TestReelDegradePersistsRoot(t *testing.T) {
 				if snapshotFloat(decoded.Fields, decoded.Class, csStrength) != force {
 					t.Fatal("encoded worn root mismatch")
 				}
-				if fresh.Durability != reel.Durability {
-					t.Fatal("wear changed reel durability")
+				// 本体耐久是轮内零件的综合：磨薄摩擦片它就得降（只降不升），
+				// 烧穿时熔断到 0，客户端才会红框、才修不好就收不了线。
+				if fresh.Durability > reel.Durability {
+					t.Fatalf("wear raised reel durability: %v -> %v", reel.Durability, fresh.Durability)
+				}
+				if path == "slip" {
+					if wearOut != (fresh.Durability == 0) {
+						t.Fatalf("reel durability must follow washer wear: worn=%t durability=%v", wearOut, fresh.Durability)
+					}
+				} else if fresh.Durability != reel.Durability {
+					// 只磨零件字段的入口不负责本体：聚合发生在结算与伤害入口。
+					t.Fatalf("bare washer degradation must not touch reel durability: %v -> %v", reel.Durability, fresh.Durability)
 				}
 				perf, err := srv.syncReelPerformance(ctx, fresh)
 				if err != nil {

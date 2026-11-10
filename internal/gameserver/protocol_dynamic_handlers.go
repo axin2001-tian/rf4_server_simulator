@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"rf4server/internal/proto"
 	"rf4server/internal/wiregen"
@@ -314,28 +315,41 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 	if srv.DB != nil && rodGUID != zeroGUID && ctx.DecodeOK {
 		outcome, err := srv.breakLineOrRod(ctx.Sess.pushCtx(), ctx.Sess.Userid, rodGUID, brokenGUID)
 		if err == nil {
+			if outcome.OverloadProtected {
+				ctx.ReplyFailure("System.OperationCanceledException", "满红不爆已取消装备破坏")
+				return nil, true
+			}
 			st.mu.Lock()
 			if st.biteTimer != nil {
 				st.biteTimer.Stop()
 			}
 			pending := st.Pending
-			st.Pending = nil
-			st.CastActive = false
-			st.Hooked = false
-			st.Resolved = true
-			if !outcome.LineBroken && !outcome.ReelDamaged && !outcome.ComponentBroken {
-				st.GearGuid = ""
+			if outcome.KeepFight {
+				// 官服断轮：轮子坏了收不动线，但钓组与鱼都还在，搏鱼继续。
+				// 这里不能清 Pending/Hooked，否则客户端按跑鱼收尾、整轮直接结束；
+				// 后续等客户端断线(17/9)或玩家剪线(17/10)再收尾。
+			} else {
+				st.Pending = nil
+				st.CastActive = false
+				st.Hooked = false
+				st.Resolved = true
+				if !outcome.LineBroken && !outcome.ReelDamaged && !outcome.ComponentBroken {
+					st.GearGuid = ""
+				}
 			}
 			st.mu.Unlock()
-			if outcome.ReelDamaged {
-				// 轮子只是降一个耐久阶段，仍留在竿上；本次鱼按超载跑鱼处理。
+			switch {
+			case outcome.KeepFight:
+				// 鱼仍咬钩，不记跑鱼。
+			case outcome.ReelDamaged:
+				// 泄力打滑/摩擦片磨穿：鱼借线跑了。
 				srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
-			} else if outcome.LineBroken {
+			case outcome.LineBroken:
 				srv.bumpFishingCounter(ctx.Sess.Userid, "line_breaks")
-			} else if outcome.ComponentBroken {
+			case outcome.ComponentBroken:
 				// 钩/拟饵等终端件断裂：竿仍在手上，钓组摘除损坏件。
 				srv.bumpFishingCounter(ctx.Sess.Userid, "component_breaks")
-			} else {
+			default:
 				srv.bumpFishingCounter(ctx.Sess.Userid, "rod_breaks")
 			}
 			obj, berr := buildGearBreakResult(outcome)
@@ -364,9 +378,13 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 			}
 			reelBroken := outcome.ReelBroken
 			frictionWorn := outcome.FrictionWorn
+			keepFight := outcome.KeepFight
 			ctx.AfterResponse(func() {
 				ctx.Sess.Push4_22Items(syncGUIDs)
 				switch {
+				case keepFight:
+					// 官服断轮：鱼还咬着钩，只是收不动线。
+					ctx.Sess.pushSystemChat("渔线轮已损坏，无法收线；鱼仍在钩上，可剪线或等线被拉断")
 				case reelBroken:
 					// 轮子本体耐久归零，整体损坏。
 					ctx.Sess.pushSystemChat("渔线轮已损坏，请到工坊修理后再使用")
@@ -375,6 +393,10 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 					ctx.Sess.pushSystemChat("摩擦片磨穿、泄力失效，请到工坊更换摩擦片")
 				}
 			})
+			if keepFight {
+				// 鱼仍咬钩：不推跑鱼提示，搏鱼等 17/9/17/10 收尾。
+				return body, true
+			}
 			// 断件必丢鱼：11028 只表达装备损坏，另经聊天频道提示跑鱼。
 			reason := "断竿"
 			switch {
@@ -515,8 +537,30 @@ func hRodCutLine(ctx *Ctx) ([]byte, bool) {
 	return body, true
 }
 
-// hDynamicRewardEntry 处理 3/40，返回 2015 奖励条目并回显请求中的 guid。
-// 没有奖励持久化表时保留空物品 ID，不生成不存在的 systemID。
+// firstBoolValue 取请求树中的第一个 bool 参数；3/40 的第二个参数是可见性。
+func firstBoolValue(v *proto.Value) (bool, bool) {
+	if v == nil {
+		return false, false
+	}
+	if v.Kind == proto.KindBool {
+		return v.Bool, true
+	}
+	for _, it := range v.Items {
+		if got, ok := firstBoolValue(it); ok {
+			return got, true
+		}
+	}
+	for _, f := range v.Fields {
+		if got, ok := firstBoolValue(f.Val); ok {
+			return got, true
+		}
+	}
+	return false, false
+}
+
+// hDynamicRewardEntry 处理 3/40，按 guid 返回单条 2015 奖赏条目（enikeammfen）。
+// 命中库中真实奖赏物品则填 item_id/容器/数量/创建时间/名次，并把请求 bool
+// 写入 f1（可见性）；否则回显 guid（空物品 ID），不生成不存在的 systemID。
 func hDynamicRewardEntry(ctx *Ctx) ([]byte, bool) {
 	guid := zeroGUID
 	for _, g := range deepGUIDs(ctx.Tree) {
@@ -525,15 +569,36 @@ func hDynamicRewardEntry(ctx *Ctx) ([]byte, bool) {
 			break
 		}
 	}
+	visibility, hasVisibility := firstBoolValue(ctx.Tree)
+	if srv := ctx.Sess.Srv; srv != nil && srv.DB != nil && guid != "" && guid != zeroGUID {
+		if row, err := srv.DB.GetItemByGUID(ctx.Sess.pushCtx(), guid); err == nil && row != nil && row.UID == ctx.Sess.Userid &&
+			row.WireClass == "enikeammfen" && row.TypeID == 2015 {
+			if hasVisibility {
+				if err := setRewardVisibility(ctx.Sess.pushCtx(), srv.DB, row, visibility); err != nil {
+					ctx.Log.Error("3/40 奖赏可见性写库失败", "guid", shortGUID(guid), "err", err)
+					return nil, false
+				}
+			}
+			// 与 3/16 共用构造器：工艺/耐久/时间一律取物品行的真实值。
+			obj, merr := makeRewardEntry(row)
+			if merr == nil {
+				if body, e := proto.EncodeValue(obj, ctx.Sess.Table()); e == nil {
+					return body, true
+				}
+			}
+		}
+	}
+	// 未命中真实物品：回显 guid 的空壳，不编造时间/数值。
+	// f6/f7 仍按 float 位模式填 0，与 enikeammfen 字段语义保持一致。
 	obj, err := wiregen.MakeObj("enikeammfen", map[int]*proto.Value{
 		0:  proto.U32(0),
-		1:  proto.U32(1),
+		1:  proto.U32(0),
 		2:  proto.Guid(guid),
 		3:  proto.Guid(""),
 		4:  proto.U32(10),
 		5:  proto.U32(0),
-		6:  proto.U32(0),
-		7:  proto.U32(0),
+		6:  proto.F32(0),
+		7:  proto.F32(0),
 		8:  proto.U64(0),
 		9:  proto.U64(0),
 		10: proto.U32(0),
@@ -582,7 +647,8 @@ func hDynamicEquippedItems(ctx *Ctx) ([]byte, bool) {
 // 已配置水域生成 15004/15005 回声；未知或空水域返回空网格。
 func hDynamicSonar(ctx *Ctx) ([]byte, bool) {
 	key := argFirstStr(ctx.Tree)
-	obj, err := ctx.Sess.Srv.sonarResponse(ctx.Sess.pushCtx(), key)
+	c := sonarRollContext(ctx.Sess.Srv, ctx.Sess, key, time.Now())
+	obj, err := ctx.Sess.Srv.sonarResponse(ctx.Sess.pushCtx(), key, c)
 	if err != nil {
 		return nil, false
 	}
@@ -591,6 +657,37 @@ func hDynamicSonar(ctx *Ctx) ([]byte, bool) {
 		return nil, false
 	}
 	return body, true
+}
+
+func sonarRollContext(srv *Server, sess *Session, key string, now time.Time) fishRollContext {
+	c := fishRollContext{uid: sess.Userid, loc: key, now: now, cache: newFishingRollCache()}
+	if st := srv.fishingState(sess.Userid); st != nil {
+		st.mu.Lock()
+		c.spot = st.Spot
+		c.rigType = st.RigType
+		c.depthCM = st.effectiveBaitDepthCMLocked(now)
+		c.lureLayer = st.LureLayer
+		c.lureAction = st.LureAction
+		c.lureMask = st.LureMotionMask
+		c.lureSpeed = st.ReelSetting
+		c.skill = st.Bonus
+		if st.HasCastPos {
+			c.x, c.z, c.hasPos = st.CastPosX, st.CastPosZ, true
+		} else if st.HasPos {
+			c.x, c.z, c.hasPos = st.PosX, st.PosZ, true
+		}
+		c.onBoat, c.boatKnown = st.onBoatLocked(now.Unix())
+		gearGUID := st.GearGuid
+		st.mu.Unlock()
+		if gearGUID != "" && srv.DB != nil {
+			cctx := sess.pushCtx()
+			c.baits = srv.currentBaits(cctx, gearGUID)
+			c.hook = srv.loadGearSpecForRig(cctx, srv.rigGearIDs(cctx, sess.Userid, gearGUID), gearGUID)
+		}
+	}
+	c.weather = sess.weatherAt(key, now)
+	c.happyBite = sess.currentHappyHour().BiteBonus
+	return c
 }
 
 type handitemThrowConsume struct {

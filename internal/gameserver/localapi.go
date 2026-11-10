@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"rf4server/internal/store"
 	"strconv"
 	"time"
 )
@@ -31,7 +32,6 @@ func (s *Server) StartLocalAPI(addr string) (func(), error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/shop/drinks", s.apiShopDrinks)
 	mux.HandleFunc("/api/shop/buy", s.apiShopBuy)
-	mux.HandleFunc("/api/fishing/giftbag", s.apiFishingGiftBag)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -137,35 +137,6 @@ func (s *Server) apiShopBuy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "price": price, "item": itemID})
 }
 
-// apiFishingGiftBag 返回当前待结算鱼中携带福袋的条目（MOD 搏鱼换福袋模型轮询用）。
-// 只读不改状态；识别是显示级，不影响发放正确性。
-func (s *Server) apiFishingGiftBag(w http.ResponseWriter, r *http.Request) {
-	uid, _ := strconv.ParseInt(r.URL.Query().Get("uid"), 10, 64)
-	if uid <= 0 {
-		uid = 1000001
-	}
-	type giftBagFish struct {
-		RodGUID     string `json:"rod_guid"`
-		Species     string `json:"species"`
-		GiftBagItem string `json:"gift_bag_item_id"`
-	}
-	out := make([]giftBagFish, 0)
-	if s.liveSessionByUID(uid) == nil {
-		// 玩家不在线：Pending 是断线挂鱼恢复态，MOD 无需识别，返回空避免误挂+无效扫描
-		writeJSON(w, map[string]any{"ok": true, "fish": out})
-		return
-	}
-	for _, st := range s.fishingStatesFor(uid) {
-		st.mu.Lock()
-		f := st.Pending
-		if f != nil && f.GiftBagID != "" {
-			out = append(out, giftBagFish{RodGUID: st.GearGuid, Species: f.Species, GiftBagItem: f.GiftBagID})
-		}
-		st.mu.Unlock()
-	}
-	writeJSON(w, map[string]any{"ok": true, "fish": out})
-}
-
 // buyDrink 扣款 + 入库 + 推送档案；事务与商店购买保持一致。
 func (s *Server) buyDrink(ctx context.Context, uid int64, storeID, itemID string, goldCol bool) (int64, error) {
 	price, err := s.storePrice(ctx, storeID, itemID, 0, goldCol)
@@ -192,15 +163,38 @@ func (s *Server) buyDrink(ctx context.Context, uid int64, storeID, itemID string
 	if err := applyWalletTx(ctx, tx, uid, silverDelta, goldDelta, "buy", itemID, "", note); err != nil {
 		return 0, err
 	}
+	granted := make([]*store.Item, 0, len(prepared))
 	for _, it := range prepared {
-		if _, _, gerr := grantPreparedItemTx(ctx, tx, it, true); gerr != nil {
+		row, _, gerr := grantPreparedItemTx(ctx, tx, it, true)
+		if gerr != nil {
 			return 0, gerr
+		}
+		if row != nil {
+			granted = append(granted, row)
+		}
+	}
+	if len(granted) > 0 {
+		// 与 22/2 一样留一条购买凭据，客户端商店里的「退货」才有据可依
+		if err := s.saveStorePurchaseTx(ctx, tx, uid, storeID, itemID, price, goldCol, granted); err != nil {
+			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	if sess := s.liveSessionByUID(uid); sess != nil {
+		// 面板下单走的是本地 HTTP，没有 22/2 那条购买回执，客户端不会自己往背包里加东西：
+		// 只推 2/1 只会刷新银币/等级，背包还是空的（扣了钱看不到货）。
+		// 这里按「背包物品变更」通道把新物品再推一遍，客户端才会真的入包。
+		guids := make([]string, 0, len(granted))
+		for _, row := range granted {
+			if row != nil && row.GUID != "" {
+				guids = append(guids, row.GUID)
+			}
+		}
+		if len(guids) > 0 {
+			sess.Push4_22ItemGUIDs(guids)
+		}
 		sess.Push2_1()
 	}
 	return int64(price), nil

@@ -195,6 +195,30 @@ func (d *DB) KeepnetInsert(ctx context.Context, e *KeepnetEntry) error {
 	return err
 }
 
+// KeepnetListTx KeepnetList 的事务版：制作扣料需要在同一事务内
+// "列出-匹配-消费"鱼护条目时使用（鱼护渔获当制作材料）。
+func (d *DB) KeepnetListTx(ctx context.Context, tx *sql.Tx, uid int64) ([]*KeepnetEntry, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT echo_guid, uid, COALESCE(species,''), COALESCE(name_zh,''), weight_g, length_m,
+		       cat, COALESCE(keep_loc,''), COALESCE(keep_spot,0), COALESCE(keep_bait,''),
+		       COALESCE(keep_level,''), COALESCE(ts,0)
+		FROM keepnet_items WHERE uid=? ORDER BY ts`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*KeepnetEntry
+	for rows.Next() {
+		e := &KeepnetEntry{}
+		if err := rows.Scan(&e.EchoGUID, &e.UID, &e.Species, &e.NameZh, &e.WeightG, &e.LengthM,
+			&e.Cat, &e.KeepLoc, &e.KeepSpot, &e.KeepBait, &e.KeepLevel, &e.TS); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // KeepnetGet 按 echo_guid 取。
 func (d *DB) KeepnetGet(ctx context.Context, uid int64, echoGUID string) (*KeepnetEntry, error) {
 	row := d.SQL.QueryRowContext(ctx, `
@@ -248,12 +272,14 @@ func (d *DB) KeepnetDelete(ctx context.Context, uid int64, echoGUIDs []string) e
 
 // ---- 钓获日志 ----
 
-// CatchCountAtLeastGrade 统计玩家 grade≥minGrade 的钓获条数。
-// 稀有鱼（奖杯）按 grade>=3 计，与统计页和玩家卡片的计数口径一致。
-func (d *DB) CatchCountAtLeastGrade(ctx context.Context, uid, minGrade int64) (int64, error) {
+// RareSpeciesCount 统计玩家钓到过 grade≥minGrade（重量稀有/超级稀有）的
+// 鱼种数，按 fish_key 去重。面板等级旁星号与 24/19 玩家卡共用该口径
+// （客户端两路同落 ifbfdldbana.gebeadddmlp）；统计页 3/2 的逐鱼种条数
+// 是另一口径，不经此函数。
+func (d *DB) RareSpeciesCount(ctx context.Context, uid, minGrade int64) (int64, error) {
 	var n int64
 	err := d.SQL.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM catch_log WHERE uid=? AND COALESCE(grade,0)>=?`, uid, minGrade).Scan(&n)
+		`SELECT COUNT(DISTINCT fish_key) FROM catch_log WHERE uid=? AND COALESCE(grade,0)>=?`, uid, minGrade).Scan(&n)
 	return n, err
 }
 

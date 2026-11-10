@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -81,8 +82,6 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("POST /api/players/membership", auth(s.handlePlayerMembership))
 	mux.HandleFunc("POST /api/players/happyhour", auth(s.handlePlayerHappyHour))
 	mux.HandleFunc("POST /api/players/grant", auth(s.handleGrantItem))
-	mux.HandleFunc("GET /api/players/giftbag", auth(s.handlePlayerGiftBag))
-	mux.HandleFunc("POST /api/players/giftbag/pool", auth(s.handleGiftBagPoolSave))
 	mux.HandleFunc("POST /api/players/items/delete", auth(s.handlePlayerItemDelete))
 	mux.HandleFunc("POST /api/players/keepnet/add", auth(s.handlePlayerKeepnetAdd))
 	mux.HandleFunc("POST /api/players/keepnet/delete", auth(s.handlePlayerKeepnetDelete))
@@ -101,6 +100,13 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("POST /api/fish/config", auth(s.handleFishConfigSave))
 	mux.HandleFunc("POST /api/fish/config/reset", auth(s.handleFishConfigReset))
 	mux.HandleFunc("GET /api/fish/pool", auth(s.handleFishPool))
+	mux.HandleFunc("GET /api/hooks/profiles", auth(s.handleHookProfiles))
+	mux.HandleFunc("POST /api/hooks/profiles", auth(s.handleHookProfileSave))
+	mux.HandleFunc("GET /api/bait/prefs", auth(s.handleBaitPrefs))
+	mux.HandleFunc("GET /api/bait/items", auth(s.handleBaitItems))
+	mux.HandleFunc("GET /api/bait/categories", auth(s.handleBaitCategories))
+	mux.HandleFunc("PUT /api/bait/rules", auth(s.handleBaitRuleSave))
+	mux.HandleFunc("POST /api/bait/rules/reset", auth(s.handleBaitRuleReset))
 	mux.HandleFunc("POST /api/mail/send", auth(s.handleMailSend))
 	mux.HandleFunc("GET /api/audit", auth(s.handleAudit))
 	mux.HandleFunc("GET /api/about", auth(s.handleAbout))
@@ -278,6 +284,31 @@ func (s *Server) handleTunableList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m)
 }
 
+// eventSwitchPeer 返回与指定活动开关互斥的另一个开关；非活动开关返回空串。
+func eventSwitchPeer(key string) string {
+	switch key {
+	case "event_newyear_enabled":
+		return "event_anniversary_enabled"
+	case "event_anniversary_enabled":
+		return "event_newyear_enabled"
+	}
+	return ""
+}
+
+// validateEventBranches 校验活动分支配置：逗号分隔的 9~20 整数，空串表示不下发。
+func validateEventBranches(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(value, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 9 || n > 20 {
+			return fmt.Errorf("活动分支只能是 9~20 的 ID，用逗号分隔")
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key   string `json:"key"`
@@ -289,27 +320,23 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Key {
 	case "fish_ecology_enabled", "fish_bait_rules_enabled", "fish_distribution_enabled",
-		"fish_weather_enabled", "happy_hour_enabled", store.GiftBagDropEnabledKey:
+		"fish_weather_enabled", "happy_hour_enabled", "grade_ratio_enabled", "hook_nibble_enabled",
+		"event_anniversary_enabled", "event_newyear_enabled":
 		if req.Value != "0" && req.Value != "1" {
 			httpError(w, 400, "开关只能为 0 或 1")
 			return
 		}
-	case store.GiftBagDropChanceKey:
-		f, err := strconv.ParseFloat(strings.TrimSpace(req.Value), 64)
-		if err != nil || f < 0 || f > 1 {
-			httpError(w, 400, "掉落概率需在 0 ~ 1 之间")
+	}
+	if req.Key == "hook_spawn_match_strength" {
+		v, err := strconv.ParseFloat(req.Value, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 2 {
+			httpError(w, 400, "钩型发鱼软匹配强度必须在 0~2")
 			return
 		}
-	case store.GiftBagDropYearsKey:
-		n, err := strconv.ParseInt(strings.TrimSpace(req.Value), 10, 64)
-		if err != nil || n < 0 || n > store.GiftBagAllYears {
-			httpError(w, 400, "年份掩码需在 0 ~ 31 之间")
-			return
-		}
-	case store.GiftBagDropDailyKey:
-		n, err := strconv.ParseInt(strings.TrimSpace(req.Value), 10, 64)
-		if err != nil || n < 0 {
-			httpError(w, 400, "每日上限不能为负")
+	}
+	if req.Key == "event_branches" {
+		if err := validateEventBranches(req.Value); err != nil {
+			httpError(w, 400, err.Error())
 			return
 		}
 	}
@@ -318,6 +345,17 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "tunable", req.Key, req.Value)
+	// 两个限时活动互斥：开启任一个自动关闭另一个。5012 同时出现阶段 5/6 时
+	// 客户端只显示新年入口，周年面板会变成不可达。
+	if req.Value == "1" {
+		if peer := eventSwitchPeer(req.Key); peer != "" {
+			if err := s.db.TunableSet(r.Context(), peer, "0", adminOf(r)); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+			_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "tunable", peer, "0")
+		}
+	}
 	// 通知主服立即刷新运行参数；后台也会按缓存周期生效。
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "reload_tunables"}))
 	writeJSON(w, map[string]any{"ok": true})
@@ -334,6 +372,7 @@ type playerRow struct {
 	Gold    int64   `json:"gold"`
 	Bank    int64   `json:"bank"`
 	Banned  bool    `json:"banned"`
+	Online  bool    `json:"online"`
 	Updated float64 `json:"updated_ts"`
 }
 
@@ -354,7 +393,42 @@ func (s *Server) handlePlayers(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
+	online := s.onlineUIDs(ctx)
+	for i := range rows {
+		rows[i].Online = online[rows[i].UID]
+	}
 	writeJSON(w, rows)
+}
+
+const onlineUIDsMaxAge = 30 * time.Second
+
+type onlineUIDsSnapshot struct {
+	UpdatedAt int64   `json:"updated_at"`
+	UIDs      []int64 `json:"uids"`
+}
+
+// onlineUIDs 读取 gameserver 每 5 秒发布的在线玩家快照；键缺失、格式错误或
+// 快照超过 onlineUIDsMaxAge 时按全部离线处理，避免异常退出后的陈旧名单长期生效。
+func (s *Server) onlineUIDs(ctx context.Context) map[int64]bool {
+	raw, ok, err := s.db.KVGet(ctx, "stats:online_uids")
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var snap onlineUIDsSnapshot
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil || snap.UpdatedAt <= 0 {
+		return nil
+	}
+	age := time.Since(time.Unix(snap.UpdatedAt, 0))
+	if age < -5*time.Second || age > onlineUIDsMaxAge {
+		return nil
+	}
+	out := make(map[int64]bool, len(snap.UIDs))
+	for _, uid := range snap.UIDs {
+		if uid > 0 {
+			out[uid] = true
+		}
+	}
+	return out
 }
 
 func queryPlayers(ctx context.Context, db *store.DB, out *[]playerRow, q string, args ...any) error {

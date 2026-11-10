@@ -350,6 +350,11 @@ func (s *Server) ItemToTree(ctx context.Context, it *store.Item) (*proto.Value, 
 // 只填充空槽，已有子对象的槽保持不变。
 func (s *Server) materializeInto(ctx context.Context, class string, def *store.ItemDef, obj *proto.Value, guid string, workmanship, durability float64) {
 	attrs := defAttrs(def)
+	if class == "dgjinoebdop" {
+		// 部分旧轮型只有顶层定义，没有嵌套六件；用同系列完整轮型做只读零件模板，
+		// 否则这些轮子会绕过摩擦片、轴承、齿轮和轮油磨损。
+		attrs = s.reelMaterializationAttrs(ctx, def)
+	}
 	if attrs == nil {
 		return
 	}
@@ -428,6 +433,34 @@ func normalizeLeaderInnerWire(old *proto.Value) (*proto.Value, bool) {
 	return obj, true
 }
 
+// itemStrengthForPush 返回要下发给客户端的受力上限。
+//
+// 自制引线（leader_crafted_*）必须走实例材料：定义里的内嵌线材与连接件是
+// null，strengthBitsFor 只会得到 0，客户端拿到的就一直是制作时写进快照的旧值，
+// 磨损不体现、服务端最弱环也看不见这根引线。这里按材料定义重算并乘当前耐久，
+// 让两端用同一个数。耐久已耗尽时不改写，保留"损坏件不强写 0"的既有行为。
+func (s *Server) itemStrengthForPush(
+	ctx context.Context,
+	def *store.ItemDef,
+	it *store.Item,
+	fields []proto.Field,
+) (float64, bool) {
+	if strength, ok := strengthBitsFor(def, it.Durability); ok {
+		return strength, true
+	}
+	if def != nil && def.Category == gearCatLeader && it.Durability > 0 {
+		base := s.craftedLeaderBaseStrengthFromFields(ctx, it.WireClass, fields)
+		if base > 0 {
+			durability := it.Durability
+			if durability > 1 {
+				durability = 1
+			}
+			return base * durability, true
+		}
+	}
+	return 0, false
+}
+
 // canonicalizeItemPhysicalFields 是物品物理字段的统一投影入口。
 //
 // fields_json 保存物品身份和状态，但工艺、耐久、强度、刹车片曳力和容器枚举
@@ -474,7 +507,7 @@ func (s *Server) canonicalizeItemPhysicalFields(ctx context.Context, it *store.I
 		if s.canonicalizeReelStrength(ctx, it, fields) {
 			changed = true
 		}
-	} else if strength, ok := strengthBitsFor(def, it.Durability); ok {
+	} else if strength, ok := s.itemStrengthForPush(ctx, def, it, fields); ok {
 		idx := fieldIdxByCS(class, csStrength)
 		if setWireFloat(fields, class, idx, strength) {
 			changed = true

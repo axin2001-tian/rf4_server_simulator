@@ -54,10 +54,16 @@ func (s *Server) drinkXPBonusTx(ctx context.Context, tx *sql.Tx, uid, baseXP int
 		peak := 0.0
 		if silver, gold := drinkPriceTx(ctx, tx, state.SourceGUID); silver > 0 || gold > 0 {
 			peak = drinkPeakByPrice(silver, gold)
+		} else if state.Peak > 0 {
+			peak = state.Peak
 		} else if rule, ok := drinkRuleForCategory(state.Category); ok {
 			peak = rule.Peak
 		}
 		rate := drinkRateForPeak(peak, duration, remaining)
+		if rate <= 0 && state.Peak <= 0 {
+			// 兼容旧行：迁移新增的 peak 默认为 0，回退类别默认峰值与时长。
+			rate = drinkRate(state.Category, remaining)
+		}
 		if rate > best.Multiplier {
 			guid := state.SourceGUID
 			if guid == "" {

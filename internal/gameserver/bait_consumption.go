@@ -50,7 +50,9 @@ func (s *Server) baitedHookSets(ctx context.Context, rod string) []baitedHookSet
 	}
 	comps := s.storedRigComponents(ctx, rod)
 	rigType := s.rigTypeForWrite(ctx, rod)
-	count := max(len(slotIndicesFor(rigType, catHook)), len(slotIndicesFor(rigType, catLure)))
+	// 钩位数按运行时实际钩组件算：倒钓臂展开后 rig 50/51 会有 250/1001/1005/1009
+	// 多条钩，只看模板会把多钩当单钩，饵全部并进第一枚钩。
+	count := hookPositionsIn(rigType, comps)
 	assignments, err := s.baitHookAssignments(ctx, rod, comps, count <= 1)
 	if err != nil {
 		return nil
@@ -216,7 +218,7 @@ func (s *Server) rememberMountedBaitHook(ctx context.Context, rod, bait, previou
 	}
 	if hook == "" {
 		rigType := s.rigTypeForWrite(ctx, rod)
-		if max(len(slotIndicesFor(rigType, catHook)), len(slotIndicesFor(rigType, catLure))) <= 1 && len(hooks) > 0 {
+		if hookPositionsIn(rigType, comps) <= 1 && len(hooks) > 0 {
 			hook = comps[hooks[0]].GUID
 		} else if row, ok := comps[rigCompKey(catHook, ordinal)]; ok {
 			hook = row.GUID
@@ -240,6 +242,7 @@ func (s *Server) applyBaitedHookSpec(ctx context.Context, group baitedHookSet, s
 		return false
 	}
 	spec.HookPresent = true
+	spec.HookItemID = def.ItemID
 	spec.HookSize = itemDefInt(def, gearAttrHookSize)
 	spec.HookLengthMM = itemDefF32(def, gearAttrHookLen)
 	spec.HookStrengthKg = itemDefF32(def, gearAttrMaxLoad) * clampFloat(durability, 0, 1)
@@ -559,6 +562,21 @@ func (s *Server) consumeHookedBait(sess *Session, f *RolledFish, rod string) err
 	return nil
 }
 
+// consumeNibbleBait 处理“鱼碰到/嘬到饵但没中钩”的轻量消耗。
+// 事件键加 :nibble，与同一条鱼的中钩扣饵分开，避免重放重复扣。
+func (s *Server) consumeNibbleBait(sess *Session, f *RolledFish, rod string) error {
+	if sess == nil || f == nil || !f.BaitsKnown {
+		return nil
+	}
+	change, err := s.consumeBaitEvent(sess.pushCtx(), sess.Userid, rod,
+		f.FishGUID+":nibble", strings.Fields(f.BaitGUIDs), false)
+	if err != nil {
+		return err
+	}
+	sess.pushBaitChange(change)
+	return nil
+}
+
 func (s *Server) consumeCastBait(sess *Session, st *FishState) error {
 	st.mu.Lock()
 	rod, cast := st.GearGuid, st.CastTs
@@ -607,8 +625,9 @@ func (s *Server) reloadBaitForCast(ctx context.Context, uid int64, rod string) (
 		return out, fmt.Errorf("不能为其他玩家的钓组补饵")
 	}
 	rigType := s.rigTypeForWrite(ctx, rod)
-	multi := max(len(slotIndicesFor(rigType, catHook)), len(slotIndicesFor(rigType, catLure))) > 1
-	for ordinal := int64(0); ordinal < int64(baitSlotCount(rigType)); ordinal++ {
+	comps := s.storedRigComponents(ctx, rod)
+	multi := hookPositionsIn(rigType, comps) > 1
+	for ordinal := int64(0); ordinal < int64(baitSlotCountIn(rigType, comps)); ordinal++ {
 		key := fmt.Sprintf("rebait:%d", ordinal)
 		id, err := s.DB.GetRodSetting(ctx, rod, key)
 		if err == sql.ErrNoRows {

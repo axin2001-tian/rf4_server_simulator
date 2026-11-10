@@ -58,7 +58,7 @@ func registerWorldHandlers(d *Dispatch) {
 	d.Register(4, 6, hItemMove)
 	d.Register(4, 7, hItemRemove)
 	d.Register(4, 8, hItemUse)
-	// 4/8 有两种合法响应：普通物品使用回 800 快照；福袋回 806（ldkingipcpa，
+	// 4/8 有两种合法响应：普通物品使用回 800 快照；礼盒拆包回 806（ldkingipcpa，
 	// 客户端据此弹“找到物品”对话框）。command_contract 只登记了 800，
 	// 需显式放行 806，否则响应会被契约守卫拒发，客户端一直转圈。
 	d.RegisterResponseContract(4, 8, ResponseContractRule{
@@ -211,6 +211,7 @@ func hItemRemove(ctx *Ctx) ([]byte, bool) {
 }
 
 // hItemUse 处理 4/8，返回被寻址物品的单件 800 快照。
+// 礼盒（ieopbeejfmc=true 的 cat 55）由 useGiftBox 拦截拆开。
 func hItemUse(ctx *Ctx) ([]byte, bool) {
 	srv := ctx.Sess.Srv
 	if !srv.requireDB(ctx) {
@@ -222,7 +223,7 @@ func hItemUse(ctx *Ctx) ([]byte, bool) {
 	if body, handled := srv.useSkillBook(ctx); handled {
 		return body, true
 	}
-	if body, handled := srv.useGiftBag(ctx); handled {
+	if body, handled := srv.useGiftBox(ctx); handled {
 		return body, true
 	}
 	guids := deepGUIDs(ctx.Tree)

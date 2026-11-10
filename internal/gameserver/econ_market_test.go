@@ -39,6 +39,7 @@ func importFishStaticForProbe(t *testing.T, db *store.DB, tables ...string) {
 // TestRollFishUsesStaticTables 验证静态鱼库优先，鱼种来自地点名册并覆盖内置池；
 // 无数据地点仍回退内置池。
 func TestRollFishUsesStaticTables(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "roll.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +118,7 @@ func TestRollFishUsesStaticTables(t *testing.T) {
 // TestFishMarketFlow 验证钓获、14/4 结算和 20/2 卖鱼的完整流程：
 // 结算只发经验；卖鱼按 20/1 报价入账一次，并删除护网行、发送 2/1 和 4/21 推送。
 func TestFishMarketFlow(t *testing.T) {
+	t.Parallel()
 	db := connectTestDB(t)
 	defer db.Close()
 	// 缩短咬钩等待（tunables 优先，tunableF 首读进缓存——必须在第一杆前写入）
@@ -204,6 +206,16 @@ func TestFishMarketFlow(t *testing.T) {
 	fishGUID := fishObj.Field(0).Hex
 	if fishGUID == "" {
 		t.Fatal("27.f0 鱼 guid 缺失")
+	}
+	// Issue #314：这里验证鱼市/入护流程，不验证随机钩型保持率。固定当前
+	// pending 鱼为稳定中钩样本，避免 14/11 偶发进入 nibble 分支。
+	if st := srv.fishingStateForRod(uid, rodGUID); st != nil {
+		st.mu.Lock()
+		if st.Pending != nil {
+			st.Pending.BiteQuality = "solid"
+			st.Pending.HookHoldP = 1
+		}
+		st.mu.Unlock()
 	}
 	fc.SendRequest(203, 14, 11) // 刺中（fire-and-forget，无响应；推 4/22）
 
@@ -314,6 +326,7 @@ func TestFishMarketFlow(t *testing.T) {
 
 // TestMarketPricingModel 验证新鲜度、腐败和鱼市计价。
 func TestMarketPricingModel(t *testing.T) {
+	t.Parallel()
 	now := float64(time.Now().Unix())
 	// 新鲜度阶梯（FRESHNESS_TIERS）
 	cases := []struct {
@@ -334,14 +347,16 @@ func TestMarketPricingModel(t *testing.T) {
 	if !isFishRotten(now-86401, now) {
 		t.Error("86401s 应判腐败")
 	}
-	// 报价：perch g2 782g 鲜鱼 = round(0.1176/28 × 782 × 100) = 328 分
+	// 报价：perch g2 782g 鲜鱼 = round(0.1176/28 × 782 × 100 × 每日系数)
 	e := &store.KeepnetEntry{Species: "perch", Cat: 2, WeightG: 782, TS: now}
-	if got := marketPriceCents(e, now); got != 328 {
-		t.Errorf("perch g2 782g 报价 = %d want 328", got)
+	wantPerch := int64(math.Max(1, math.Round(0.1176/28.0*782*100*dailyMarketFactor("perch", now))))
+	if got := marketPriceCents(e, now); got != wantPerch {
+		t.Errorf("perch g2 782g 报价 = %d want %d", got, wantPerch)
 	}
 	// 未标定种兜底（MARKET_RATE_FALLBACK g2=0.10/28）
 	e2 := &store.KeepnetEntry{Species: "no_such_fish", Cat: 2, WeightG: 100, TS: now}
-	if got := marketPriceCents(e2, now); got != int64(mathRound(0.10/28.0*100*100)) {
+	wantFallback := int64(math.Max(1, math.Round(0.10/28.0*100*100*dailyMarketFactor("no_such_fish", now))))
+	if got := marketPriceCents(e2, now); got != wantFallback {
 		t.Errorf("未标定种兜底报价 = %d", got)
 	}
 	// g1 = g2 价 ×0.45
@@ -352,6 +367,7 @@ func TestMarketPricingModel(t *testing.T) {
 
 // TestWorkshopRepairCost 验证修理费用公式。
 func TestWorkshopRepairCost(t *testing.T) {
+	t.Parallel()
 	if got := repairCost(0, false, 1.0, 1.0); got != 300 {
 		t.Errorf("银修（1 槽全额磨损）= %d want 300", got)
 	}
@@ -369,6 +385,7 @@ func TestWorkshopRepairCost(t *testing.T) {
 // TestWorkshopRepairMapAndBrandMultiplier 验证地图倍率、品牌覆盖、
 // 店铺地图优先级和未知数据回退。
 func TestWorkshopRepairMapAndBrandMultiplier(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		mapKey  string
@@ -406,6 +423,7 @@ func TestWorkshopRepairMapAndBrandMultiplier(t *testing.T) {
 // TestWorkshopRepairFallbackUsesStoreMapAndBrand 21/3 在客户端报价=0 时，
 // fallback 必须走店铺所属地图/品牌倍率，而不是恒定 1.0。
 func TestWorkshopRepairFallbackUsesStoreMapAndBrand(t *testing.T) {
+	t.Parallel()
 	srv, db := newEconomyTxTestServer(t)
 	ctx0 := context.Background()
 	const uid = int64(3301)
@@ -457,6 +475,7 @@ func TestWorkshopRepairFallbackUsesStoreMapAndBrand(t *testing.T) {
 
 // TestFishNameValidation 验证蓝冠鱼命名规则。
 func TestFishNameValidation(t *testing.T) {
+	t.Parallel()
 	ok := []string{"Big Fish", "Karp-1", "Лещ_2", "a.b_c d9"}
 	bad := map[string]string{
 		"":         "空名字",
@@ -486,6 +505,7 @@ func TestFishNameValidation(t *testing.T) {
 
 // TestLevelKeyOfLoc 地点解析（fishing.level_of 口径）。
 func TestLevelKeyOfLoc(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "loc.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -511,9 +531,10 @@ func TestLevelKeyOfLoc(t *testing.T) {
 	}
 }
 
-// TestRepairFlow 银修理闭环：磨损 → 21/3 按客户端报价扣费 → 耐久回 1.0 →
+// TestRepairFlow 银修理闭环：磨损 → 21/3 按服务端价格扣费 → 耐久回 1.0 →
 // 4/5 重建树耐久字段同步（durability 生命周期最小模型）。
 func TestRepairFlow(t *testing.T) {
+	t.Parallel()
 	db := openItemTestDB(t)
 	ctx := context.Background()
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "repair"}}, logging.Discard(), nil)
@@ -535,14 +556,15 @@ func TestRepairFlow(t *testing.T) {
 	p0, _ := db.EnsureProfile(ctx, 1000001)
 	silver0 := p0.Silver
 
-	// 21/3 请求：args[str guid, obj(17510){GUID16, VAL, OPT, U64 价 120}]
+	// 21/3 请求：args[str guid, obj(17510){GUID16, VAL, OPT, U64 价 0}]
+	// f3=0 表示客户端不报价，由服务端按店铺倍率计算。
 	req := proto.Args524(
 		proto.StrVal(guid),
 		wiregen.MustMakeObj("nfmkdcbnkhp", map[int]*proto.Value{
 			0: proto.Guid(guid),
 			1: proto.TypedU32Arr("17", []uint32{11}),
 			2: proto.U32(0),
-			3: proto.U64(120),
+			3: proto.U64(0),
 		}),
 	)
 	body, err := proto.EncodeValue(req, sess.Table())
@@ -578,15 +600,15 @@ func TestRepairFlow(t *testing.T) {
 	if !foundRepairLog {
 		t.Fatalf("缺少修理历史: %+v", damageLogs)
 	}
-	// 按客户端报价扣费
+	// 按服务端价格扣费：0.5 磨损、1 槽、workshop_01 倍率 1.0。
 	p1, _ := db.EnsureProfile(ctx, 1000001)
-	if p1.Silver != silver0-120 {
-		t.Fatalf("应按客户端报价扣 120 银： %d -> %d", silver0, p1.Silver)
+	if p1.Silver != silver0-150 {
+		t.Fatalf("应按服务端价格扣 150 银： %d -> %d", silver0, p1.Silver)
 	}
 	var txnN int64
 	if err := db.SQL.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM txn WHERE uid=? AND kind=? AND silver_delta=?`,
-		int64(1000001), "repair", -120).Scan(&txnN); err != nil {
+		int64(1000001), "repair", -150).Scan(&txnN); err != nil {
 		t.Fatalf("txn 查询失败: %v", err)
 	}
 	if txnN != 1 {
