@@ -51,6 +51,11 @@ type Session struct {
 	happyOpMu    sync.Mutex
 	happyStatus  store.HappyHourStatus
 
+	// kitchenMu 串行化同一会话的 kitchen_eat 请求：防止快速连按 E 时，
+	// 不同 CallID 的并发请求同时落入"读冷却戳→写冷却戳"的检查-更新区间，
+	// 导致后一个请求在数据库写入阶段出错并回退成客户端 ORE16 通用内部错误弹窗。
+	kitchenMu sync.Mutex
+
 	log *slog.Logger
 }
 

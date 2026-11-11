@@ -536,9 +536,13 @@ func applyConsumableRestoreTx(ctx context.Context, tx *sql.Tx, uid int64, kind s
 // conditionFreeMealKV 免费餐冷却戳（kv 表，值为世界钟游戏日号）。
 const conditionFreeMealKV = "condition_free_meal:%d"
 
-// operationResultFoodAidOnceADay 官服结果码 16：
+// operationResultFoodAidOnceADay 官服结果码 127：
 // kOperationResult_FoodAidAvailableOnceADay。
-const operationResultFoodAidOnceADay = 16
+// 客户端 dchjlkidjdc.lapcaibjebj 用 switch(code-0x6f) 映射业务文案：
+// case 16 → code=111+16=127 才是"免费餐每天一次"；回 16 会落到
+// kCommon_E_INTERNAL_WITHCODE 兜底，弹"内部错误（错误代码：ORE16）"
+// （锚点：84=LowEnergy、136=WrongRegion=case 25 同在该 switch，均与官方口径吻合）。
+const operationResultFoodAidOnceADay = 127
 
 // gameDayNumberAt 世界钟游戏日号（24 倍速，1 游戏日 = 1 现实小时）。
 func gameDayNumberAt(now time.Time) int64 {
@@ -549,7 +553,7 @@ func gameDayNumberAt(now time.Time) int64 {
 //
 // 请求只携带厨房物件 ID，不携带食物实例；
 // 官服由服务端厨房食材账本扣减，本服未建模食材账本，故按"免费餐车"语义实现：
-// 每游戏日限一次免费餐（1 游戏日 = 1 现实小时），冷却中回官服结果码 16。
+// 每游戏日限一次免费餐（1 游戏日 = 1 现实小时），冷却中回官服结果码 127。
 // 恢复对齐抓包：进食后下一条 2/2 饱食度回到 1.0。成功响应回 null（与官服
 // resp-3-13 模板一致）；幂等由通用请求回执表兜底。
 func hKitchenEat(ctx *Ctx) ([]byte, bool) {
@@ -561,9 +565,14 @@ func hKitchenEat(ctx *Ctx) ([]byte, bool) {
 	if !p.Enabled {
 		return []byte{0x00}, true
 	}
+	// 串行化同一会话的进食请求：快速连按 E 会以不同 CallID 并发到达，
+	// 若不加锁，多个请求会同时通过冷却检查并写库，后写入者可能在
+	// 数据库层出错，被客户端渲染成通用的 ORE16 内部错误弹窗。
+	ctx.Sess.kitchenMu.Lock()
+	defer ctx.Sess.kitchenMu.Unlock()
 	cctx, uid := ctx.Sess.pushCtx(), ctx.Sess.Userid
 	// 官服口径：免费餐每游戏日一次（一天=游戏时间，见 Further Notes [决策]）；
-	// 冷却中回官服结果码 16，客户端弹 kOperationResult_FoodAidAvailableOnceADay 文案。
+	// 冷却中回官服结果码 127，客户端弹 kOperationResult_FoodAidAvailableOnceADay 文案。
 	gameDay := gameDayNumberAt(time.Now())
 	key := fmt.Sprintf(conditionFreeMealKV, uid)
 	var last string
