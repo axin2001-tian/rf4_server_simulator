@@ -165,7 +165,9 @@ func (s *Server) buyDrink(ctx context.Context, uid int64, storeID, itemID string
 	}
 	granted := make([]*store.Item, 0, len(prepared))
 	for _, it := range prepared {
-		row, _, gerr := grantPreparedItemTx(ctx, tx, it, true)
+		// 与 22/2 一样按购买批次独立入库（merge=false）：并进已有堆会复用同一个 GUID，
+		// 写购买凭据时 kv 主键重复，同一种酒第二次买就直接失败。
+		row, _, gerr := grantPreparedItemTx(ctx, tx, it, false)
 		if gerr != nil {
 			return 0, gerr
 		}

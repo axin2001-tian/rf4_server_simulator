@@ -23,10 +23,10 @@ var traceCmds = func() bool {
 }()
 
 // traceHexMax 是每行 hex 的最大字节数。默认 160；存在 data/trace_full.on
-// 时放宽到 4096，用于逐字节排查协议字段（调试完删掉该文件即可）。
+// 时放宽到 65536，用于逐字节排查协议字段（调试完删掉该文件即可）。
 var traceHexMax = func() int {
 	if _, err := os.Stat("data/trace_full.on"); err == nil {
-		return 4096
+		return 65536
 	}
 	return 160
 }()

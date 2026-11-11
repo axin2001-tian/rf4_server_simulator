@@ -80,7 +80,6 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("GET /api/players/records", auth(s.handlePlayerRecords))
 	mux.HandleFunc("POST /api/players/records", auth(s.handlePlayerRecordsSave))
 	mux.HandleFunc("POST /api/players/membership", auth(s.handlePlayerMembership))
-	mux.HandleFunc("POST /api/players/happyhour", auth(s.handlePlayerHappyHour))
 	mux.HandleFunc("POST /api/players/grant", auth(s.handleGrantItem))
 	mux.HandleFunc("POST /api/players/items/delete", auth(s.handlePlayerItemDelete))
 	mux.HandleFunc("POST /api/players/keepnet/add", auth(s.handlePlayerKeepnetAdd))
@@ -331,6 +330,13 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseFloat(req.Value, 64)
 		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 2 {
 			httpError(w, 400, "钩型发鱼软匹配强度必须在 0~2")
+			return
+		}
+	}
+	if strings.HasPrefix(req.Key, "grade_pct_") {
+		v, err := strconv.ParseFloat(req.Value, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			httpError(w, 400, "鱼获档位权重必须是非负数字")
 			return
 		}
 	}

@@ -12,8 +12,9 @@ import (
 
 func grantHappyHourTestProfile(t *testing.T, db *store.DB, uid int64) {
 	t.Helper()
-	if _, err := db.SQL.Exec(`INSERT INTO profile(uid,name,happy_hour,happy_hour_exp) VALUES(?,'player',?,0)
-		ON CONFLICT(uid) DO UPDATE SET happy_hour=2,happy_hour_exp=0`, uid, store.HappyHourUnlimited); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO profile(uid,name,membership) VALUES(?,'player',?)
+		ON CONFLICT(uid) DO UPDATE SET membership=?,membership_exp=0`,
+		uid, store.HappyHourUnlimited, store.HappyHourUnlimited); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -156,8 +157,8 @@ func TestHappyHourValidFishingPendingAndCloseFence(t *testing.T) {
 	if r := sess.updateHappyHour(now, false); !r.Active {
 		t.Fatal("pending fight after bait consumption lost qualification")
 	}
-	if r := sess.updateHappyHour(now.Add(10*time.Second), false); r.RemainingSeconds != 3590 {
-		t.Fatalf("fight time not counted: %+v", r)
+	if r := sess.updateHappyHour(now.Add(10*time.Second), false); r.RemainingSeconds != store.HappyHourUnlimitedSeconds {
+		t.Fatalf("permanent member remaining changed: %+v", r)
 	}
 	var wg sync.WaitGroup
 	for range 12 {

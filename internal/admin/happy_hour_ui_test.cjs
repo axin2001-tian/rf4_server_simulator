@@ -33,7 +33,7 @@ test('happy hour switch and remaining time fit supported sizes and long text',as
    await page.reload();await page.waitForFunction(()=>document.getElementById('happyHourSwitch').checked===false);
    await toggle.click();await page.waitForFunction(()=>{const e=document.getElementById('happyHourSwitch');return !e.disabled&&e.checked===true;});
    assert.deepEqual(writes.map(x=>x.value),['0','1']);
-   for(const [scenario,text,active,remaining,label] of [['normal','欢乐时光',true,3600,'生效中'],['chinese','最长合理欢乐时光状态说明'.repeat(12),false,1800,'暂停'],['continuous','UnbrokenHappyHourStatus'.repeat(25),false,0,'暂停']]){
+   for(const [scenario,text,active,remaining,label] of [['normal','欢乐时光',true,3600,'生效中'],['chinese','最长合理欢乐时光状态说明'.repeat(12),false,1800,'已开启'],['continuous','UnbrokenHappyHourStatus'.repeat(25),false,0,'已开启']]){
     await page.evaluate(()=>location.hash='fish');await page.locator('#view-fish').waitFor({state:'visible'});
     await page.waitForFunction(()=>!document.getElementById('happyHourSwitch').disabled);
     // 说明面板默认收起；量文字溢出前先展开
@@ -49,7 +49,7 @@ test('happy hour switch and remaining time fit supported sizes and long text',as
      PLAYER={uid:1,name:'测试玩家',level:25,xp:0,item_count:0,keepnet_count:0,mail_count:0,membership:0,skills:[],happy_hour:{enabled:true,qualified:true,unlimited:false,expires_at:0,active,remaining_seconds:remaining}};
      PLAYER_TAB='profile';renderPlayerDetail();
     },{active,remaining});
-    const clock=page.locator('#playerHappyHour');assert.match(await clock.textContent(),new RegExp(label));assert.match(await clock.textContent(),new RegExp('今日剩余 '+Math.ceil(remaining/60)+' 分钟'));
+    const clock=page.locator('#playerHappyHour');assert.match(await clock.textContent(),new RegExp(label));assert.match(await clock.textContent(),new RegExp('剩余 '+Math.ceil(remaining/60)+' 分钟'));
     if(scenario!=='normal')await clock.evaluate((e,text)=>e.append(' '+text),text);
     const clockSize=await clock.evaluate(e=>{
      const r=e.getBoundingClientRect(),range=document.createRange();range.selectNodeContents(e);
@@ -60,7 +60,7 @@ test('happy hour switch and remaining time fit supported sizes and long text',as
     measurements.push({width,dpi,scenario,...switchSize,happyWidth:clockSize.width,happyHeight:clockSize.height,happyFont:clockSize.font});
    }
    await page.evaluate(()=>{PLAYER.happy_hour={enabled:false,qualified:true,unlimited:false,expires_at:0,active:false,remaining_seconds:1800};renderPlayerDetail()});
-   assert.match(await page.locator('#playerHappyHour').textContent(),/已关闭.*今日剩余 30 分钟/);
+   assert.match(await page.locator('#playerHappyHour').textContent(),/已关闭.*剩余 30 分钟/);
    assert.deepEqual(errors,[]);await context.close();
   }
  }finally{await browser.close();}

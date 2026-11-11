@@ -308,6 +308,12 @@ func (s *Server) ItemToTree(ctx context.Context, it *store.Item) (*proto.Value, 
 		return nil, err
 	}
 	fields = alignFieldsToOps(it, fields)
+	// 竿架竿位设置兜底：存量竿架没有 f1 时客户端建不出竿位设置，
+	// 电子报警器不会亮也不会响（见 rodpod.go）。
+	// 编码以客户端反编译为准：[0x03]["cmdhipmffij"][u16 n] + n×([0x01][u32 11502][7B])。
+	if rodPodInjectSlots && it.WireClass == rodPodWireClass {
+		ensureRodPodSlots(it, fields)
+	}
 	obj := proto.Obj(it.WireClass, uint32(it.TypeID), fields...)
 
 	class := it.WireClass
