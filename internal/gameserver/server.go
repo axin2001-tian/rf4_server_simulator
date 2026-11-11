@@ -65,12 +65,10 @@ type Server struct {
 	fishEcologyCacheLoaded bool
 
 	// 运行参数缓存
-	tunMu       sync.Mutex
-	tunCache    map[string]float64
-	tunAt       time.Time
-	tunStrCache map[string]string
-	tunStrAt    time.Time
-	tunText     map[string]string
+	tunMu    sync.Mutex
+	tunCache map[string]float64
+	tunText  map[string]string
+	tunAt    time.Time
 
 	// 鱼饵规则覆盖缓存（后台可编辑，TTL 兜底 + 写操作主动失效）
 	baitOvMu    sync.RWMutex

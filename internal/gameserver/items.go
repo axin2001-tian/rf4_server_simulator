@@ -666,10 +666,21 @@ func canonicalizeNestedItemContainers(class string, fields []proto.Field) bool {
 
 // canonicalizeReelStrength updates only the reel root scale, leaving installed
 // parts untouched. FieldsJSON must describe the currently selected parts.
+//
+// 轮根（nlmnpekipjc/csStrength）官方语义是"出厂满耐久轮身强度"规格，与摩擦片
+// 拖力是两个独立字段（官方 4/22 实抓：轮根 126.35 = 规格表 127.94 × 轴承耐久
+// 0.98779，比值 2.2~3.6× 摩擦片）。轮根规格表命中的轮子按
+// root_spec × 轴承子件耐久 下发；摩擦片磨损只写摩擦片字段（147 子件 f0），
+// 不再污染轮根。未收录的 ItemID 回退旧口径（摩擦片值）。
 func (s *Server) canonicalizeReelStrength(ctx context.Context, it *store.Item, fields []proto.Field) bool {
 	if it == nil || it.WireClass != "dgjinoebdop" {
 		return false
 	}
+	if spec, ok := reelRootSpec(it.ItemID); ok {
+		_, _, bearingDur := s.reelPartStateFromRow(ctx, it, reelPartCatBearing)
+		return setWireFloat(fields, it.WireClass, fieldIdxByCS(it.WireClass, csStrength), spec*clampUnit(bearingDur))
+	}
+	reelRootMissOnce(func(msg string, keys ...any) { s.log.Warn(msg, keys...) }, it.ItemID)
 	if strength, present := s.reelInstalledDragFieldFromRow(ctx, it); present {
 		return setWireFloat(fields, it.WireClass, fieldIdxByCS(it.WireClass, csStrength), strength)
 	}
@@ -735,6 +746,14 @@ func (s *Server) rebuildRod(ctx context.Context, it *store.Item, obj *proto.Valu
 		child, cerr := s.buildFactoryChild(ctx, it, sysID, i)
 		if cerr != nil || child == nil {
 			continue
+		}
+		// 竿侧受力磨损把子件耐久持久化在 DB 字段树里（applyRodStressWear）：
+		// 现建子件前先把已持久化的耐久合并回来，否则每次快照都会把磨损抹回满值。
+		// 状态位/其余字段仍以现建为准，只合并耐久一项。
+		if old := obj.Fields[i].Val; old != nil && old.Kind == proto.KindObj {
+			if dur := reelChildDurability(old); dur < 1 {
+				setReelChildDurability(child, dur)
+			}
 		}
 		obj.Fields[i].Val = child
 	}

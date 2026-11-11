@@ -158,6 +158,13 @@ type KeepnetEntry struct {
 	KeepBait  string  `json:"keep_bait"`
 	KeepLevel string  `json:"keep_level"`
 	TS        float64 `json:"ts"`
+	// ModelVariant 这尾鱼在客户端用的 FishFamily 族名（a_salmon_f2 等）；
+	// 空=用鱼种默认族。不入库：每次序列化按（鱼种、体重、体长、GUID）重算，
+	// 同一尾鱼在任何界面都得到同一个族名。
+	ModelVariant string `json:"-"`
+	// TackleCat 是钓法大类快照（1=浮钓 2=路亚 3=底钓 11=海钓，0=未知），
+	// 入护时随 catch_log 落库，供 321 统计按钓法分族。
+	TackleCat int64 `json:"tackle_cat"`
 }
 
 // KeepnetList 全量条目（按时间升序）。
@@ -276,6 +283,9 @@ func (d *DB) KeepnetDelete(ctx context.Context, uid int64, echoGUIDs []string) e
 // 鱼种数，按 fish_key 去重。面板等级旁星号与 24/19 玩家卡共用该口径
 // （客户端两路同落 ifbfdldbana.gebeadddmlp）；统计页 3/2 的逐鱼种条数
 // 是另一口径，不经此函数。
+//
+// catch_log 在 14/4 结算就落库（source='catch'），入护只抬成 'keep'，
+// 放生保持 'catch' —— 所以「钓到过」包含放生的鱼，与稀有鱼奖座同步。
 func (d *DB) RareSpeciesCount(ctx context.Context, uid, minGrade int64) (int64, error) {
 	var n int64
 	err := d.SQL.QueryRowContext(ctx,
@@ -284,7 +294,15 @@ func (d *DB) RareSpeciesCount(ctx context.Context, uid, minGrade int64) (int64, 
 }
 
 // CatchLogInsert 记录一次新增钓获；入护重试由 KeepFishingCatch 按鱼 GUID 去重。
+// 钓法快照未知（0）时使用，正常钓获请用 CatchLogInsertTackle。
 func (d *DB) CatchLogInsert(ctx context.Context, uid int64, loc string, spot int64, fishKey, nameZh string, weightG int64, lengthM float64, source, bait string, grade, xp, silver int64, locLevel string) error {
+	return d.CatchLogInsertTackle(ctx, uid, loc, spot, fishKey, nameZh, weightG, lengthM,
+		source, bait, grade, xp, silver, locLevel, 0)
+}
+
+// CatchLogInsertTackle 同上，并写入钓法大类快照（1=浮钓 2=路亚 3=底钓 11=海钓，0=未知）。
+// 321 统计的浮钓/路亚/底钓纪录卡与竿/钓组聚合按该列分族，缺快照只能回退旧口径。
+func (d *DB) CatchLogInsertTackle(ctx context.Context, uid int64, loc string, spot int64, fishKey, nameZh string, weightG int64, lengthM float64, source, bait string, grade, xp, silver int64, locLevel string, tackleCat int64) error {
 	var identifier [16]byte
 	if _, err := rand.Read(identifier[:]); err != nil {
 		return err
@@ -293,10 +311,10 @@ func (d *DB) CatchLogInsert(ctx context.Context, uid int64, loc string, spot int
 	ts := float64(time.Now().UnixNano()) / 1e9
 	_, err := d.SQL.ExecContext(ctx, `
 		INSERT INTO catch_log(ts, loc, spot, fish_key, name_zh, weight_g, length_m, source,
-		                      bait, grade, xp, silver, loc_level, uid, catch_guid)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                      bait, grade, xp, silver, loc_level, uid, catch_guid, tackle_cat)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ts, loc, spot, fishKey, nameZh, weightG, lengthM, source,
-		bait, grade, xp, silver, locLevel, uid, fmt.Sprintf("%x", identifier))
+		bait, grade, xp, silver, locLevel, uid, fmt.Sprintf("%x", identifier), tackleCat)
 	return err
 }
 
@@ -643,11 +661,15 @@ func (d *DB) ItemPriceGet(ctx context.Context, itemID string) (*ShopPrice, error
 	return p, nil
 }
 
-// ShelfPriceLowest 该商品在全部基础货架（shop_item）与后台覆盖价
-// （shop_item_override）中的最低非零银价。贩卖机配方（9/1/9/4）没有门店
-// 上下文，用全货架最低价保证"机器做不会比去店里买贵"；无定价时返回
-// sql.ErrNoRows，由调用方决定整体失败。
-func (d *DB) ShelfPriceLowest(ctx context.Context, itemID string) (int64, error) {
+// CraftIngredientSilverPrice 贩卖机配料的银币单价。
+// 先取全部基础货架（shop_item）与后台覆盖价（shop_item_override）的最低
+// 非零银价——贩卖机配方（9/1/9/4）没有门店上下文，用全货架最低价保证
+// "机器做不会比去店里买贵"；仍无价时（自制窝料的添加槽可选到未上架的
+// 成品饵，如 fplt_op_ccp7 只有金币价目）按商店货架补齐同款口径估价：
+// 同类同级最贵 → 同类型中位价 → 同品类中位价 → 1000，再按 item_id 稳定
+// 上浮 0~10%（与 augmentShopShelf 同公式，同一商品估价恒定）。全链路
+// 无价才返回 sql.ErrNoRows，由调用方决定整体失败。
+func (d *DB) CraftIngredientSilverPrice(ctx context.Context, itemID string) (int64, error) {
 	row := d.SQL.QueryRowContext(ctx, `
 		SELECT COALESCE(MIN(s), 0) FROM (
 			SELECT silver AS s FROM shop_item WHERE item_id=? AND silver>0
@@ -658,10 +680,27 @@ func (d *DB) ShelfPriceLowest(ctx context.Context, itemID string) (int64, error)
 	if err := row.Scan(&price); err != nil {
 		return 0, err
 	}
-	if price <= 0 {
+	if price > 0 {
+		return price, nil
+	}
+	if err := d.loadShopSupplement(ctx); err != nil {
+		return 0, err
+	}
+	m, ok := d.shopSupplement.metas[itemID]
+	if !ok {
 		return 0, sql.ErrNoRows
 	}
-	return price, nil
+	est := d.shopSupplement.seriesMax[shopSeriesKey(m.Kind, m.Name)]
+	if est <= 0 {
+		est = d.shopSupplement.medianByKind[m.Kind]
+	}
+	if est <= 0 {
+		est = d.shopSupplement.medianByCat[m.Category]
+	}
+	if est <= 0 {
+		est = 1000
+	}
+	return est + est*int64(stableHash(itemID)%11)/100, nil
 }
 
 // ItemPriceFallbackList 价目兜底货架（非空价前 N 件）。
@@ -754,6 +793,42 @@ func (d *DB) TunableSet(ctx context.Context, key, value, updatedBy string) error
 		key, value, updatedBy, float64(time.Now().Unix()),
 		value, updatedBy, float64(time.Now().Unix()))
 	return err
+}
+
+// SpawnModeSet 原子写入发鱼模式三开关：grade_ratio_enabled、fish_hunt_enabled、
+// two_stage_hunt_enabled。三种模式互斥，事务保证不会出现中间态。
+func (d *DB) SpawnModeSet(ctx context.Context, mode, updatedBy string) error {
+	values := map[string]string{
+		"grade_ratio_enabled":    "0",
+		"fish_hunt_enabled":      "0",
+		"two_stage_hunt_enabled": "0",
+	}
+	switch mode {
+	case "grade_ratio":
+		values["grade_ratio_enabled"] = "1"
+	case "fish_hunt":
+		values["fish_hunt_enabled"] = "1"
+	case "two_stage":
+		values["two_stage_hunt_enabled"] = "1"
+	default:
+		return fmt.Errorf("未知发鱼模式: %s", mode)
+	}
+	now := float64(time.Now().Unix())
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, key := range []string{"grade_ratio_enabled", "fish_hunt_enabled", "two_stage_hunt_enabled"} {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO tunables(key, value, updated_by, updated_ts) VALUES(?,?,?,?)
+			ON CONFLICT (key) DO UPDATE SET value=?, updated_by=?, updated_ts=?`,
+			key, values[key], updatedBy, now,
+			values[key], updatedBy, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // TunableList 全量参数。

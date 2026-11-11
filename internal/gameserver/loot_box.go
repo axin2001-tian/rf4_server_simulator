@@ -41,7 +41,8 @@ type lootBoxDef struct {
 	Chance  float64         `json:"chance"` // 每次钓获触发的概率 0..1
 	Rewards []lootBoxReward `json:"rewards"`
 	// CarrierItem 可选：开袋时额外发放的"可见载体"物品。
-	// 需要"背包里看得见一个袋子"时，把这里填成可正常显示的道具
+	// category 73 的 gift_bag 没有 wire class 映射，直接发会让客户端物化出错，
+	// 因此默认不发；需要"背包里看得见一个袋子"时，把这里填成可正常显示的道具
 	// （例如 category 55 的套盒）。
 	CarrierItem string `json:"carrier_item"`
 	CarrierQty  int64  `json:"carrier_qty"`

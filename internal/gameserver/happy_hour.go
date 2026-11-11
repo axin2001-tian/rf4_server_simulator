@@ -61,7 +61,9 @@ func (sess *Session) updateHappyHour(now time.Time, closing bool) store.HappyHou
 		sess.happyStartNotified = true
 		sess.happyMu.Unlock()
 		if fire {
-			sess.Push2_1()
+			// 异步推送：BuildProfile307W 内部会经 stateFor 重排咬钩 timer
+			// （biteTicket++），同步调用会让正在派发的咬钩票失效、鱼口被推迟。
+			go sess.Push2_1()
 		}
 	} else if !status.Active {
 		sess.happyMu.Lock()

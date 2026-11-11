@@ -19,6 +19,11 @@ func electricReelRow(t *testing.T, srv *Server, db *store.DB, ctx context.Contex
 
 func electricMechanicalLockForTest(t *testing.T, srv *Server, ctx context.Context, row *store.Item) float64 {
 	t.Helper()
+	// 统一口径：规格表收录的轮子机械承力 = 出厂规格 × 轴承子件耐久；未收录回退旧公式。
+	if spec, ok := reelRootSpec(row.ItemID); ok && row.Durability > 0 {
+		_, _, bearingDurability := srv.reelPartStateFromRow(ctx, row, reelPartCatBearing)
+		return spec * clampUnit(bearingDurability)
+	}
 	_, bearingQuality, bearingDurability := srv.reelPartStateFromRow(ctx, row, reelPartCatBearing)
 	_, gearQuality, gearDurability := srv.reelPartStateFromRow(ctx, row, reelPartCatGear)
 	return reelLockedDragKg(
@@ -128,7 +133,8 @@ func TestElectricReelLockedDragTracksPartChangesWithoutCompounding(t *testing.T)
 			first.LockedDragKg, upgraded.LockedDragKg)
 	}
 
-	// 机械承力成为限制项时，修改摩擦片也必须实时反映到 3 倍后的锁轮值。
+	// 统一口径：摩擦片数值只作用于 1~29 档泄力，锁轮承力 = 规格×轴承耐久，
+	// 修改摩擦片不得再影响锁轮值。
 	setElectricWasherDragForTest(t, srv, db, ctx, reelGUID, 10)
 	lowBrake, err := srv.syncReelPerformance(ctx, wearReelRow(t, db, ctx, reelGUID))
 	if err != nil || lowBrake == nil {
@@ -139,13 +145,13 @@ func TestElectricReelLockedDragTracksPartChangesWithoutCompounding(t *testing.T)
 	if err != nil || highBrake == nil {
 		t.Fatalf("高制动同步失败: %v", err)
 	}
-	if highBrake.LockedDragKg <= lowBrake.LockedDragKg+1e-6 {
-		t.Fatalf("加强摩擦片后锁轮值应上升：%.6f -> %.6f",
+	if math.Abs(highBrake.LockedDragKg-lowBrake.LockedDragKg) > 1e-9 {
+		t.Fatalf("摩擦片数值不应影响锁轮承力：%.6f -> %.6f",
 			lowBrake.LockedDragKg, highBrake.LockedDragKg)
 	}
 }
 
-func TestElectricReelMotorDurabilityAggregatesWithoutFuse(t *testing.T) {
+func TestElectricReelMotorExcludedFromBodyAggregation(t *testing.T) {
 	srv, db := newRigTestServer(t)
 	ctx := context.Background()
 	row := electricReelRow(t, srv, db, ctx, "elcon_6003")
@@ -159,13 +165,12 @@ func TestElectricReelMotorDurabilityAggregatesWithoutFuse(t *testing.T) {
 	if !found {
 		t.Fatal("电轮缺少电机")
 	}
+	// 电机磨损通道停扣（官服无电轮数据，2026-11-11 裁定），聚合不再纳入电机寿命：
+	// 电机耐久怎么变都不应影响本体那一格，也不能把整轮判死。
 	setReelChildDurability(motor, 0.2)
 	after, ok := srv.reelBodyDurabilityInFields(ctx, row, fields)
-	if !ok || after >= before {
-		t.Fatalf("电机磨损后本体耐久应下降：%.6f -> %.6f", before, after)
-	}
-	if after <= 0 {
-		t.Fatalf("电机归零前不应作为熔断件：%.6f", after)
+	if !ok || math.Abs(after-before) > 1e-9 {
+		t.Fatalf("电机停扣后不应影响本体聚合：%.6f -> %.6f", before, after)
 	}
 
 	setReelChildDurability(motor, 0)
@@ -185,35 +190,27 @@ func TestElectricReelMotorDurabilityAggregatesWithoutFuse(t *testing.T) {
 	}
 }
 
-func TestElectricReelMotorWearNeedsLoadAndRepairsToFull(t *testing.T) {
+func TestElectricReelMotorNotWornByStress(t *testing.T) {
 	srv, db := newRigTestServer(t)
 	ctx := context.Background()
 	row := electricReelRow(t, srv, db, ctx, "elcon_6003")
 	fields := snapshotFields(t, row.FieldsJSON)
 
-	if worn := srv.wearReelPartsInFields(ctx, fields, reelPartCounts{Rods: 1}); len(worn) > 0 {
-		if _, hasMotor := worn["rengine_2"]; hasMotor {
-			t.Fatal("普通抛投基准不应消耗电机")
-		}
-	}
 	motor, _, _, ok := srv.selectedReelPart(ctx, fields, reelPartCatMotor)
 	if !ok {
 		t.Fatal("电轮缺少电机")
 	}
 	motorBefore := reelChildDurability(motor)
-	worn := srv.wearReelPartsInFields(ctx, fields, reelPartCounts{OverloadSecs: 10, SlipTicks: 5})
-	if worn["rengine_2"] <= 0 {
-		t.Fatalf("锁轮过载与打滑应消耗电机，磨损表=%v", worn)
+	// 受力磨损只进矩阵内的轮件（油/齿轮/轴承/线杯）；电机不在矩阵，任何受力都不磨。
+	worn := srv.wearReelPartsInFields(ctx, fields, reelPartCounts{StressSecs: 600})
+	if _, hasMotor := worn["rengine_2"]; hasMotor {
+		t.Fatal("电机磨损已停扣，不应出现在磨损表")
 	}
-	if motorAfter := reelChildDurability(motor); motorAfter >= motorBefore {
-		t.Fatalf("电机耐久应下降：%.6f -> %.6f", motorBefore, motorAfter)
+	if motorAfter := reelChildDurability(motor); motorAfter != motorBefore {
+		t.Fatalf("电机耐久不应变化：%.6f -> %.6f", motorBefore, motorAfter)
 	}
-
-	if changed, err := srv.restoreReelInternalsInFields(ctx, row, fields); err != nil || !changed {
-		t.Fatalf("整机修理应恢复电机，changed=%v err=%v", changed, err)
-	}
-	if got := reelChildDurability(motor); got != 1 {
-		t.Fatalf("修理后电机耐久应回满，实得 %.6f", got)
+	if len(worn) == 0 {
+		t.Fatal("受力磨损应仍作用于矩阵内轮件")
 	}
 }
 

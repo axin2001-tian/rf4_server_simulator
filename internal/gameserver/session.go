@@ -54,6 +54,11 @@ type Session struct {
 	// 避免保活每 5 秒重复触发客户端弹提示。
 	happyStartNotified bool
 
+	// kitchenMu 串行化同一会话的 kitchen_eat 请求：防止快速连按 E 时，
+	// 不同 CallID 的并发请求同时落入"读冷却戳→写冷却戳"的检查-更新区间，
+	// 导致后一个请求在数据库写入阶段出错并回退成客户端 ORE16 通用内部错误弹窗。
+	kitchenMu sync.Mutex
+
 	log *slog.Logger
 }
 
@@ -80,6 +85,11 @@ func (s *Session) Done() <-chan struct{} { return s.stopCh }
 // SetState / GetState 会话状态存取（业务系统共享）。
 func (s *Session) SetState(key string, v any) {
 	s.stateMu.Lock()
+	// 手工构造的 Session（例如测试里的探针会话）没有初始化 state，这里懒建，
+	// 避免给 nil map 赋值直接 panic。
+	if s.state == nil {
+		s.state = map[string]any{}
+	}
 	s.state[key] = v
 	s.stateMu.Unlock()
 }

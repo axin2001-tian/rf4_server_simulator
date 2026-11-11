@@ -92,7 +92,8 @@ body.notice-on #view-fish.on{height:max(600px,calc(100vh - 204px))}
 @media(max-width:980px){.duo{grid-template-columns:minmax(0,1fr)!important}.tunable-fields{grid-template-columns:1fr}}
 
 /* 参数行式布局：左标签+说明，右数值+操作，双列排布 */
-.tunable-group+.tunable-group{margin-top:18px}.tunable-group h3{font-size:14px;margin:0 0 2px}.tunable-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 34px}.tunable-field{display:flex;gap:14px;align-items:center;justify-content:space-between;min-width:0;padding:9px 0;border-bottom:1px solid var(--line)}.tunable-field.tunable-wide{grid-column:1/-1}.tunable-field>div:first-child{flex:1;min-width:0}.tunable-field label{display:block;color:var(--text);margin:0;font-weight:600;overflow-wrap:anywhere}.tunable-field .tunable-hint{margin-top:2px}.tunable-field>div:last-child{display:flex;gap:8px;align-items:center;flex:none}.tunable-field.tunable-wide>div:last-child{flex-wrap:wrap;justify-content:flex-end}.tunable-field input{width:112px;min-width:0;flex:none;padding:7px 9px}.tunable-field button{flex:none}.section-head{flex-wrap:wrap}
+.params-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)}.params-tab{padding:8px 16px;border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:8px;cursor:pointer;font:inherit;font-size:13px;line-height:1.3;transition:background .12s,color .12s,border-color .12s}.params-tab:hover{color:var(--text);border-color:var(--accent)}.params-tab.on{background:rgba(66,184,255,.14);border-color:var(--accent);color:var(--accent);font-weight:600}.params-tab small{display:block;font-weight:400;font-size:11px;opacity:.75;margin-top:1px}.tunable-group+.tunable-group{margin-top:18px}.tunable-group h3{font-size:14px;margin:0 0 2px}.tunable-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 34px}.tunable-field{display:flex;gap:14px;align-items:center;justify-content:space-between;min-width:0;padding:9px 0;border-bottom:1px solid var(--line)}.tunable-field.tunable-wide{grid-column:1/-1}.tunable-field>div:first-child{flex:1;min-width:0}.tunable-field label{display:block;color:var(--text);margin:0;font-weight:600;overflow-wrap:anywhere}.tunable-field .tunable-hint{margin-top:2px}.tunable-field>div:last-child{display:flex;gap:8px;align-items:center;flex:none}.tunable-field.tunable-wide>div:last-child{flex-wrap:wrap;justify-content:flex-end}.tunable-field input{width:132px;min-width:0;flex:none;padding:7px 9px}.tunable-field input[type=number]{-moz-appearance:textfield}.tunable-field input[type=number]::-webkit-outer-spin-button,.tunable-field input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}.tunable-field button{flex:none}.section-head{flex-wrap:wrap}
+.params-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)}.params-tab{padding:8px 16px;border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:8px;cursor:pointer;font:inherit;font-size:13px;line-height:1.3;transition:background .12s,color .12s,border-color .12s}.params-tab:hover{color:var(--text);border-color:var(--accent)}.params-tab.on{background:rgba(66,184,255,.14);border-color:var(--accent);color:var(--accent);font-weight:600}.params-tab small{display:block;font-weight:400;font-size:11px;opacity:.75;margin-top:1px}.tunable-group+.tunable-group{margin-top:18px}.tunable-group h3{font-size:14px;margin:0 0 2px}.tunable-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 34px}.tunable-field{display:flex;gap:14px;align-items:center;justify-content:space-between;min-width:0;padding:9px 0;border-bottom:1px solid var(--line)}.tunable-field.tunable-wide{grid-column:1/-1}.tunable-field>div:first-child{flex:1;min-width:0}.tunable-field label{display:block;color:var(--text);margin:0;font-weight:600;overflow-wrap:anywhere}.tunable-field .tunable-hint{margin-top:2px}.tunable-field>div:last-child{display:flex;gap:8px;align-items:center;flex:none}.tunable-field.tunable-wide>div:last-child{flex-wrap:wrap;justify-content:flex-end}.tunable-field input{width:132px;min-width:0;flex:none;padding:7px 9px}.tunable-field input[type=number]{-moz-appearance:textfield}.tunable-field input[type=number]::-webkit-outer-spin-button,.tunable-field input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}.tunable-field button{flex:none}.section-head{flex-wrap:wrap}
 .grade-ratio-card{grid-column:1/-1;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:#0b1724}.grade-ratio-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.grade-ratio-head b{font-size:13px}.grade-ratio-summary{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.grade-ratio-bar{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#08111b;margin:10px 0 14px}.grade-ratio-bar i{display:block;min-width:0;transition:width .16s}.grade-ratio-row{display:grid;grid-template-columns:78px minmax(120px,1fr) 58px;align-items:center;gap:10px;margin:8px 0}.grade-ratio-row input[type=range]{width:100%;padding:0;border:0;box-shadow:none;accent-color:var(--accent)}.grade-ratio-row .share{font-family:Consolas,monospace;font-size:12px;text-align:right;color:var(--text)}.grade-ratio-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:12px}@media(max-width:720px){.grade-ratio-row{grid-template-columns:64px minmax(90px,1fr) 52px}.grade-ratio-head{display:block}.grade-ratio-summary{margin-top:6px}}
 #storeSummary{max-width:100%;overflow-wrap:anywhere}
 #playerHappyHour{overflow-wrap:anywhere}
@@ -171,7 +172,7 @@ body.notice-on #view-fish.on{height:max(600px,calc(100vh - 204px))}
     <section class="view" id="view-hooks"><div class="card"><div class="section-head"><div><h2>真实钩子型号档案</h2><small>物理数据来自 item_def；倍率和兜底值只影响咬口，不改钩子拉力</small></div></div><div class="toolbar"><input class="grow" id="hookSearch" placeholder="搜索 item_id / 厂牌，如 triple_20686、simmons" onkeydown="if(event.key==='Enter')loadHookProfiles()"><select id="hookSize"><option value="">全部尺寸</option></select><select id="hookFamily"><option value="">全部钩型族</option><option value="classic">Classic</option><option value="carp">Carp</option><option value="treble">Treble</option><option value="jighead">Jighead</option><option value="offset">Offset</option><option value="marine">Marine</option><option value="other">Other</option></select><button class="btn" onclick="loadHookProfiles()">查询</button></div><p class="muted" style="margin:10px 0">默认倍率 1.0、兜底值 0；修改后写入审计，最多 30 秒由主服热加载。入口容量按真实钩体长度计算。</p><div class="table-wrap" id="hookProfilesTable"><div class="empty">读取中…</div></div></div></section>
     <section class="view" id="view-bait"><div class="card"><div class="section-head"><div><h2>鱼饵偏好</h2><small id="baitSummary" class="muted">正在读取…</small></div></div><div class="toolbar"><input class="grow" id="baitSearch" placeholder="搜索鱼种 key / 中文名，如 pike、狗鱼" onkeydown="if(event.key==='Enter')loadBaitPrefs()"><input id="baitLoc" placeholder="水域（可选）" onkeydown="if(event.key==='Enter')loadBaitPrefs()"><select id="baitFilter" onchange="loadBaitPrefs()"><option value="">全部鱼种</option><option value="tier3">有 tier3 饵</option><option value="norule">规则表无条目</option><option value="rule">规则表有条目</option></select><button class="btn" onclick="loadBaitPrefs()">查询</button></div><p class="muted" style="margin:10px 0">规则来自编译进服务端的 fishing_bait_rules.txt（严格模式生效）；tier 来自 companion_bait_fish 实证（tier3 权重×8 / tier2 ×4 / 在列 ×2）；「证据」是实证条数。点击行展开全部饵；点右侧「编辑」可改吃/不吃/底钓只吃并配置多组轮换。</p><div class="table-wrap" id="baitTable"></div></div></section>
     <section class="view" id="view-mail"><div class="mail-box"><div class="card"><div class="section-head"><h2>撰写邮件</h2><small>队列约 2 秒内由主服投递</small></div><div class="form-grid" style="grid-template-columns:1fr 1fr"><div class="field"><label>收件人 UID</label><input id="mailUid" type="number"></div><div class="field"><label>快捷载入玩家</label><input id="mailPlayerSearch" placeholder="搜索并回车" onkeydown="if(event.key==='Enter')findMailPlayer()"></div></div><div class="field" style="margin-top:12px"><label>邮件正文</label><textarea id="mailText" placeholder="写给玩家的消息…"></textarea></div><div class="section-head" style="margin-top:14px"><h2>附件</h2><button class="btn alt sm" onclick="addAttachment()">+ 添加附件</button></div><div id="attachments"></div><div class="actions"><button class="btn good" onclick="sendMail()">发送邮件</button><button class="btn alt" onclick="previewMail()">预览</button></div></div><div class="card"><div class="section-head"><h2>发送预览</h2></div><div id="mailPreview" class="empty">填写邮件后点击预览</div><div class="section-head" style="margin-top:20px"><h2>常用模板</h2></div><div class="actions"><button class="btn alt sm" onclick="mailTemplate('补偿')">补偿邮件</button><button class="btn alt sm" onclick="mailTemplate('活动奖励')">活动奖励</button><button class="btn alt sm" onclick="mailTemplate('测试')">测试邮件</button></div></div></div></section>
-    <section class="view" id="view-params"><div class="card"><div class="section-head"><h2>游戏参数</h2><small>热更新：保存后最多 30 秒生效；随时可调回默认值，不损坏玩家存档</small></div><div id="paramsBody"></div></div></section>
+    <section class="view" id="view-params"><div class="card"><div class="section-head"><h2>游戏参数</h2><small>热更新：保存后最多 30 秒生效；随时可调回默认值，不损坏玩家存档</small></div><div class="params-tabs" id="paramsTabs"></div><div id="paramsBody"></div></div></section>
     <section class="view" id="view-release"><div class="card release-card"><div class="section-head"><div><h2>发布说明</h2><p class="muted">读取发布包内的 发布说明.md</p></div><button class="btn alt sm" onclick="loadReleaseNotes()">刷新</button></div><div class="markdown-body release-markdown" id="releaseBody"><div class="empty">读取中…</div></div></div></section>
     <section class="view" id="view-about"><div class="card about-card"><div class="about-head"><div><h2>关于本项目</h2><p>内容来自 README.md · 优先读取本地文件</p></div><a class="btn alt sm" href="https://github.com/glance522/rf4_server_simulator" target="_blank" rel="noreferrer">在 GitHub 查看</a></div><div class="markdown-body" id="aboutReadme"><div class="empty">读取中…</div></div></div></section>
     <section class="view" id="view-audit"><div class="card"><div class="section-head"><h2>最近操作</h2><small>最新 200 条</small></div><div class="table-wrap" id="auditTable"></div></div></section>
@@ -304,6 +305,8 @@ async function loadDashboardSide(){
 }
 // 参数三件套：中文标签 + 输入框 + 可见的一行说明（第 4 项为默认值，第 5 项为说明）
 const EVENT_BRANCHES_DEFAULT='9,10,11,12,13,14,15,16,17,18,19,20';
+// PARAMS_PAGE 记住「游戏参数」最后停留的子页（gameplay/reward/event）。
+let PARAMS_PAGE='';
 const TUNABLE_DEFS=[
   ['bite_probability','上鱼概率',1,'0~1。1=每竿必出；0.5=一半概率出鱼'],
   ['bite_delay_fixed','固定咬钩秒',0,'填 0=按延迟倍率随机；填了以后咬钩时间固定'],
@@ -316,14 +319,34 @@ const TUNABLE_DEFS=[
   ['fish_weight_cap','鱼重受钓具上限',0,'1=超出钓具负重的鱼按上限截断；0=不限制'],
   ['electric_locked_multiplier','电轮锁轮倍率',3,'电轮锁轮有效承力=当前机械承力与电机承力较小者的该倍率；默认3'],
   ['electric_motor_kg_per_power','电轮电机功率折算',1,'电机功率映射为承力公斤的系数；默认1，用于后续实机校准'],
+['reel_slip_wear_low','泄力打滑≤24档磨损率',0.000001,'每次打滑扣掉的摩擦片寿命比例；0.000001=0.0001%。低档位几乎不磨。范围 1e-12 ~ 1'],
+  ['reel_slip_wear_s25','泄力打滑25档磨损率',0.000025,'0.000025=0.0025%/次。范围 1e-12 ~ 1'],
+  ['reel_slip_wear_s26','泄力打滑26档磨损率',0.00005,'0.00005=0.005%/次。范围 1e-12 ~ 1'],
+  ['reel_slip_wear_s27','泄力打滑27档磨损率',0.000075,'0.000075=0.0075%/次。范围 1e-12 ~ 1'],
+  ['reel_slip_wear_s28','泄力打滑28档磨损率',0.000095,'0.000095=0.0095%/次。范围 1e-12 ~ 1'],
+  ['reel_slip_wear_max','泄力打滑29档(锁轮)磨损率',0.0001,'0.0001=0.01%/次；29档单次基准，除以打滑校准秒数得每秒率。范围 1e-12 ~ 1'],
+  ['reel_slip_calibration_seconds','打滑校准秒数',41.7,'把29档单次基准换算成每秒磨损率的除数：越大=同样打滑时长磨损越少；41.7 对齐官服 W5 实测 0.00024%/s。范围 0.01 ~ 3600'],
+  ['reel_slip_deadband_ratio','打滑判定门槛倍率',1.05,'拉力 ≤ 泄力×该倍率不算打滑：1=只要超泄力就磨；官服 1.04× 实测零磨损，默认 1.05 留死区。范围 1 ~ 10'],
+  ['wear_stress_oil_per_s','轮油受力磨损率(%/s)',0.0004,'每搏鱼受力秒扣的轮油寿命百分点；官服实测 ≈0.0004。范围 0 ~ 0.01，0=关通道'],
+  ['wear_stress_gear_per_s','主齿轮受力磨损率(%/s)',0.0004,'每搏鱼受力秒扣的主齿轮寿命百分点；官服实测 ≈0.0004。范围 0 ~ 0.01，0=关通道'],
+  ['wear_stress_bearing_per_s','轴承受力磨损率(%/s)',0.00012,'每搏鱼受力秒扣的轴承寿命百分点；官服实测 ≈0.00012。范围 0 ~ 0.01，0=关通道'],
+  ['wear_stress_spool_per_s','线杯受力磨损率(%/s)',0.00012,'每搏鱼受力秒扣的线杯寿命百分点；官服实测 ≈0.00012。范围 0 ~ 0.01，0=关通道'],
+  ['wear_stress_guides_per_s','导环受力磨损率(%/s)',0.0004,'每搏鱼受力秒扣的导环寿命百分点；官服实测 ≈0.0004。范围 0 ~ 0.01，0=关通道'],
+  ['wear_stress_rodblank_per_s','竿坯受力磨损率(%/s)',0.00003,'每搏鱼受力秒扣的竿坯寿命百分点；官服实测 ≈0.00003。范围 0 ~ 0.01，0=关通道'],
+  ['wear_leader_per_stress_sec','前导受力磨损率(%/s)',0.00005,'每搏鱼受力秒扣的前导寿命百分点；底钓2 单场实测 ≈0.00005。范围 0 ~ 0.01，0=关通道'],
+  ['reel_load_tick_seconds','负载上报兜底秒',1.9,'第一条14/8负载上报没有前序时刻时按此秒数起算。范围 0.01 ~ 600'],
+  ['reel_load_max_tick_seconds','负载上报最大秒',5,'两条14/8之间最多折算的秒数，防止迟到上报一次烧完。范围 0.01 ~ 600'],
   ['hook_nibble_enabled','嘬饵机制',0,'0=默认关闭，普通鱼和奖杯鱼首次抬竿不判嘬饵；1=恢复钩型嘬饵判定。中钩后的保持率倍率始终生效'],
   ['hook_spawn_match_strength','钩型发鱼软匹配强度',0,'0=默认关闭；1=标准；2=更偏向与钩型匹配的鱼重档位。只影响发鱼，不改后台咬口/保持率倍率'],
-  ['grade_ratio_enabled','档位比例开关',1,'1=默认开启，按下列比例出鱼并完全覆盖鱼猎阶段权重与钩型发鱼软匹配；0=保持原对数正态标定'],
+  ['grade_ratio_enabled','档位比例开关',1,'三选一发鱼模式之一（在「发鱼模式」卡片切换）；开启时按四档滑杆出鱼并覆盖鱼猎阶段权重与钩型发鱼软匹配'],
   ['grade_pct_below','未达标权重',3,'未达标档的相对权重，保存时自动归一'],
   ['grade_pct_qualified','合格权重',87.5,'合格档的相对权重，保存时自动归一'],
   ['grade_pct_trophy','奖杯权重',9,'奖杯档的相对权重，保存时自动归一'],
   ['grade_pct_super','蓝冠权重',0.5,'蓝冠档的相对权重，保存时自动归一'],
   ['fight_power_scale','搏斗拉力倍率',1,'越低鱼挣扎越小、越不易断线；1=原版'],
+  ['fish_pull_ln_slope','拉力体重斜率',0.35,'f8=k×体重kg 的种内 ln(w_kg) 斜率：调大则大鱼相对更沉；官方样本 0.3~0.4'],
+  ['fish_pull_fallback_k','未测鱼拉力兜底K',17.5,'不在拉力 K 表/习性组表的鱼种拉力基值(N/kg)：调小则未测种更省力'],
+  ['fish_initial_stamina_ratio','鱼初始体力比例(f6)',0.5628,'未实测鱼种的 f6 抗疲劳系数：0.05~1，越大越不易疲劳。官方 14 个实测鱼种已改用逐鱼种 f6 量化表（含体重台阶），本参数仅对未实测鱼种生效，对实测种无效；0=回退默认'],
   ['xp_gain','经验倍率',1,'结算经验整体缩放，1.5=多 50% 经验'],
   ['release_xp_ratio','放生经验比例',0.5,'放生时拿到入护经验的几成，0.5=一半'],
   ['fish_escape_taunt','跑鱼提示',1,'1=随机嘲讽文案；0=回退官方“鱼脱钩了”模板'],
@@ -601,10 +624,9 @@ function gradeRatioControl(t){
  });
  if(raw.every(v=>v<=0))raw.splice(0,raw.length,...GRADE_RATIO_DEFAULTS);
  const shares=gradeRatioValues(raw);
- const on=String(t.grade_ratio_enabled??1)==='1';
  const rows=GRADE_RATIO_KEYS.map((key,i)=>`<div class="grade-ratio-row"><label for="gr_${key}" style="margin:0;color:${GRADE_RATIO_META[i][1]}">${GRADE_RATIO_META[i][0]}</label><input type="range" min="0" max="100" step="0.1" id="gr_${key}" value="${raw[i]}" oninput="gradeRatioPreview()"><span class="share" id="gr_share_${i}">${shares[i].toFixed(1)}%</span></div>`).join('');
  const bar=shares.map((v,i)=>`<i style="width:${v}%;background:${GRADE_RATIO_META[i][1]}"></i>`).join('');
- return `<div class="tunable-field tunable-wide"><div><label for="tun_grade_ratio_enabled">档位比例开关</label><div class="tunable-hint">默认开启；开启后完全覆盖鱼猎阶段权重与钩型发鱼软匹配</div></div><div><button class="btn sm" id="tun_grade_ratio_enabled" style="min-width:230px;${on?'background:#2f7d4f;border-color:#2f7d4f':'opacity:.6'}" onclick="saveTunableVal('grade_ratio_enabled',${on?0:1})">${on?'档位比例：开（点击关闭）':'档位比例：关（点击开启）'}</button></div></div><div class="grade-ratio-card"><div class="grade-ratio-head"><div><b>四档相对权重</b><div class="tunable-hint">拖动滑杆即可，不需要手动凑满 100%。保存后自动换算成总和 100% 的占比；鱼种缺少档位时，服务端再按可用档位归一。</div></div><div class="grade-ratio-summary" id="gr_summary">实际占比：${shares.map(v=>v.toFixed(1)+'%').join(' / ')}</div></div><div class="grade-ratio-bar" id="gr_bar">${bar}</div>${rows}<div class="grade-ratio-actions"><button class="btn good sm" onclick="saveGradeRatio()">保存四档比例</button><button class="btn alt sm" onclick="resetGradeRatio()">恢复默认比例</button></div></div>`;
+ return `<div class="grade-ratio-card"><div class="grade-ratio-head"><div><b>档位比例·四档相对权重</b><div class="tunable-hint">拖动滑杆即可，不需要手动凑满 100%。保存后自动换算成总和 100% 的占比；鱼种缺少档位时，服务端再按可用档位归一。</div></div><div class="grade-ratio-summary" id="gr_summary">实际占比：${shares.map(v=>v.toFixed(1)+'%').join(' / ')}</div></div><div class="grade-ratio-bar" id="gr_bar">${bar}</div>${rows}<div class="grade-ratio-actions"><button class="btn good sm" onclick="saveGradeRatio()">保存四档比例</button><button class="btn alt sm" onclick="resetGradeRatio()">恢复默认比例</button></div></div>`;
 }
 function gradeRatioPreview(){
  const values=GRADE_RATIO_KEYS.map(key=>parseFloat($('#gr_'+key).value)||0);
@@ -630,8 +652,91 @@ async function resetGradeRatio(){
  gradeRatioPreview();
  await saveGradeRatio();
 }
+// ---- 发鱼模式三选一（档位比例 / 鱼猎四阶段 / 两档制）----
+const SPAWN_MODE_OPTIONS=[
+ ['grade_ratio','档位比例','按下方四档滑杆出鱼，覆盖鱼猎阶段权重与钩型发鱼软匹配'],
+ ['fish_hunt','鱼猎四阶段','淡水按日常/聚鱼/发窝/巨物四阶段出鱼；海钓、路亚同机制'],
+ ['two_stage','两档制（底浮）','底钓/浮钓只有日常与打窝两档，权重见下方滑杆；海钓、路亚仍走四阶段']
+];
+const TWO_STAGE_GROUPS={
+ daily:{keys:['two_stage_daily_below','two_stage_daily_qualified','two_stage_daily_trophy','two_stage_daily_super'],
+        defaults:[10,86.5,3,.5],title:'日常阶段·四档占比',
+        hint:'不打窝（或窝料/环境/昼夜未达标）时按这组占比出鱼'},
+ baited:{keys:['two_stage_baited_below','two_stage_baited_qualified','two_stage_baited_trophy','two_stage_baited_super'],
+         defaults:[1,92,6,1],title:'打窝阶段·四档占比',
+         hint:'窝料就位进入打窝阶段后按这组占比出鱼；奖杯保底与脱钩补偿照常生效'}
+};
+function spawnModeOf(t){
+ if(String(t.grade_ratio_enabled??'')==='1')return 'grade_ratio';
+ if(String(t.two_stage_hunt_enabled??'')==='1')return 'two_stage';
+ if(String(t.fish_hunt_enabled??'')==='1')return 'fish_hunt';
+ return 'legacy';
+}
+async function saveSpawnMode(mode){
+ const opt=SPAWN_MODE_OPTIONS.find(o=>o[0]===mode);
+ if(!opt)return;
+ await api('/api/fish/spawn_mode',{method:'POST',body:JSON.stringify({mode})});
+ toast('发鱼模式已切换为「'+opt[1]+'」，最多 30 秒生效');
+ await loadTunables();
+}
+function twoStageSliderCard(g,t){
+ const cfg=TWO_STAGE_GROUPS[g];
+ const raw=cfg.keys.map((key,i)=>{const v=parseFloat(String(t[key]??cfg.defaults[i]));return Number.isFinite(v)&&v>0?v:0});
+ if(raw.every(v=>v<=0))raw.splice(0,raw.length,...cfg.defaults);
+ const shares=gradeRatioValues(raw);
+ const rows=cfg.keys.map((key,i)=>`<div class="grade-ratio-row"><label for="ts_${g}_${key}" style="margin:0;color:${GRADE_RATIO_META[i][1]}">${GRADE_RATIO_META[i][0]}</label><input type="range" min="0" max="100" step="0.1" id="ts_${g}_${key}" value="${raw[i]}" oninput="twoStagePreview('${g}')"><span class="share" id="ts_${g}_share_${i}">${shares[i].toFixed(1)}%</span></div>`).join('');
+ const bar=shares.map((v,i)=>`<i style="width:${v}%;background:${GRADE_RATIO_META[i][1]}"></i>`).join('');
+ return `<div class="grade-ratio-card"><div class="grade-ratio-head"><div><b>${cfg.title}</b><div class="tunable-hint">${cfg.hint}。保存后自动换算成总和 100% 的占比。</div></div><div class="grade-ratio-summary" id="ts_${g}_summary">实际占比：${shares.map(v=>v.toFixed(1)+'%').join(' / ')}</div></div><div class="grade-ratio-bar" id="ts_${g}_bar">${bar}</div>${rows}<div class="grade-ratio-actions"><button class="btn good sm" onclick="saveTwoStage('${g}')">保存本组比例</button><button class="btn alt sm" onclick="resetTwoStage('${g}')">恢复默认</button></div></div>`;
+}
+function twoStagePreview(g){
+ const cfg=TWO_STAGE_GROUPS[g];
+ const values=cfg.keys.map(key=>parseFloat($('#ts_'+g+'_'+key).value)||0);
+ const shares=gradeRatioValues(values);
+ shares.forEach((share,i)=>{const el=$('#ts_'+g+'_share_'+i);if(el)el.textContent=share.toFixed(1)+'%';const seg=$('#ts_'+g+'_bar')?.children[i];if(seg)seg.style.width=share+'%'});
+ const summary=$('#ts_'+g+'_summary');
+ if(summary)summary.textContent=values.some(v=>v>0)?'实际占比：'+shares.map(v=>v.toFixed(1)+'%').join(' / '):'至少保留一个档位大于 0';
+}
+async function saveTwoStage(g){
+ const cfg=TWO_STAGE_GROUPS[g];
+ const values=cfg.keys.map(key=>parseFloat($('#ts_'+g+'_'+key).value)||0);
+ const total=values.reduce((n,v)=>n+Math.max(0,v),0);
+ if(total<=0){toast('至少保留一个档位大于 0','bad');return}
+ const shares=gradeRatioPercentValues(values);
+ for(let i=0;i<cfg.keys.length;i++){
+  await api('/api/tunables',{method:'POST',body:JSON.stringify({key:cfg.keys[i],value:String(shares[i])})});
+ }
+ toast('已保存：'+shares.map(v=>v.toFixed(1)+'%').join(' / ')+'，最多 30 秒生效');
+ await loadTunables();
+}
+async function resetTwoStage(g){
+ const cfg=TWO_STAGE_GROUPS[g];
+ cfg.keys.forEach((key,i)=>{const el=$('#ts_'+g+'_'+key);if(el)el.value=cfg.defaults[i]});
+ twoStagePreview(g);
+ await saveTwoStage(g);
+}
+function spawnModeControl(t){
+ const mode=spawnModeOf(t);
+ const btns=SPAWN_MODE_OPTIONS.map(([m,label,hint])=>`<button class="btn sm" style="min-width:180px;${mode===m?'background:#2f7d4f;border-color:#2f7d4f':'opacity:.6'}" onclick="askSpawnMode('${m}')" title="${hint}">${label}${mode===m?'：当前':''}</button>`).join('');
+ const legacyNote=mode==='legacy'?'<div class="tunable-hint" style="margin-top:8px">当前三个开关全部关闭：发鱼回退旧的对数正态体重采样路径。请选择上面三种模式之一。</div>':'';
+ const fishHuntNote=mode==='fish_hunt'?'<div class="tunable-hint" style="margin-top:8px">鱼猎四阶段权重内置为固定值（日常 74.7/24/1/0.3 · 聚鱼 54.5/43/2/0.5 · 发窝 30/61.2/6.8/2 · 巨物 10/64/20/6），暂无滑杆；奖杯保底与脱钩补偿照常生效。</div>':'';
+ let body='';
+ if(mode==='grade_ratio')body=gradeRatioControl(t);
+ else if(mode==='two_stage')body=twoStageSliderCard('daily',t)+twoStageSliderCard('baited',t);
+ return `<div class="tunable-field tunable-wide"><div><label>发鱼模式</label><div class="tunable-hint">三种模式互斥，点击即整体切换（写入三个开关，单事务保存）；切换后最多 30 秒生效。海钓与路亚在三种模式下都走四阶段。</div></div><div style="display:flex;gap:8px;flex-wrap:wrap">${btns}</div>${legacyNote}${fishHuntNote}</div>${body}`;
+}
+async function askSpawnMode(mode){
+ const opt=SPAWN_MODE_OPTIONS.find(o=>o[0]===mode);
+ if(!opt)return;
+ const cur=spawnModeOf(lastTunables);
+ if(cur===mode){toast('当前已是「'+opt[1]+'」模式');return}
+ askConfirm('切换发鱼模式','切换为「'+opt[1]+'」？三种模式互斥，会整体改写档位开关组合。',async()=>{
+  try{await saveSpawnMode(mode)}catch(e){toast(e.message,'bad')}
+ });
+}
+let lastTunables={};
 async function loadTunables(){
  const t=await api('/api/tunables');
+ lastTunables=t;
  // 行式布局：左=标签+说明，右=数值+保存/恢复默认，双列排布
  const field=key=>{
   const [,label,def,hint]=TUNABLE_DEFS.find(x=>x[0]===key);
@@ -662,19 +767,59 @@ async function loadTunables(){
     const on=parseFloat(String(t[key]??def))>0;
     return `<div class="tunable-field"><div><label for="tun_hook_nibble_enabled">${esc(label)}</label><div class="tunable-hint">${esc(hint)}</div></div><div><button class="btn sm" id="tun_hook_nibble_enabled" style="min-width:230px;${on?'background:#2f7d4f;border-color:#2f7d4f':'opacity:.6'}" onclick="saveTunableVal('hook_nibble_enabled',${on?0:1})">${on?'嘬饵机制：开（点击关闭）':'嘬饵机制：关（点击开启）'}</button></div></div>`;
   }
-  return '<div class="tunable-field"><div><label for="tun_'+key+'">'+esc(label)+'</label><div class="tunable-hint">'+esc(hint)+'</div></div><div><input type="number" step="any" id="tun_'+key+'" value="'+esc(String(t[key]??''))+'" placeholder="默认 '+def+'"><button class="btn alt sm" onclick="saveTunable(\''+key+'\')">保存</button><button class="btn alt sm" title="回写代码默认值 '+def+'" onclick="resetTunable(\''+key+'\','+def+')">恢复默认</button></div></div>';
+  // 默认值放说明行（整行宽度，再长的值也不会被截断）；占位符只做空状态提示。
+  // 早期把 def 塞进 placeholder 再配 112px 输入框，0.000001 这类小值会被截成 0.00000。
+  return '<div class="tunable-field"><div><label for="tun_'+key+'">'+esc(label)+'</label><div class="tunable-hint">'+esc(hint)+' · 默认 <b>'+esc(String(def))+'</b></div></div><div><input type="number" step="any" id="tun_'+key+'" value="'+esc(String(t[key]??''))+'" placeholder="未设置"><button class="btn alt sm" onclick="saveTunable(\''+key+'\')">保存</button><button class="btn alt sm" title="回写代码默认值 '+def+'" onclick="resetTunable(\''+key+'\','+def+')">恢复默认</button></div></div>';
  };
- const group=(title,sub,keys)=>'<section class="tunable-group"><h3>'+esc(title)+'<small style="font-weight:400;margin-left:8px;color:var(--muted)">'+esc(sub)+'</small></h3><div class="tunable-fields">'+keys.map(field).join('')+'</div></section>';
- $('#paramsBody').innerHTML=
-  group('玩法手感','咬钩快慢、饵料偏好、鱼的大小与挣扎力度',['bite_probability','bite_delay_fixed','bite_delay_scale','bite_delay_max','bite_delay_lure_max','bait_pref_scale','bait_pref_weight_shift','fish_weight_scale','fish_weight_cap','fight_power_scale'])
-  +group('电轮参数','电轮锁轮倍率与电机功率折算；改后最多 30 秒生效',['electric_locked_multiplier','electric_motor_kg_per_power'])
-  +group('钩型与咬口','嘬饵与发鱼软匹配默认关闭；后台钩型倍率仍独立生效',['hook_nibble_enabled','hook_spawn_match_strength'])
-  +group('经验与结算','改后只对新结算的鱼生效，已入护的不重算',['xp_gain','release_xp_ratio'])
-  +group('钓获掉卡','本地自定概率；最多 30 秒生效，重连或重复结算不补抽',['card_drop_normal','card_drop_star','card_drop_blue','card_drop_rare_scale'])
-  +`<section class="tunable-group"><h3>鱼获档位比例<small style="font-weight:400;margin-left:8px;color:var(--muted)">滑杆配置相对权重；缺某档阈值时其余档自动归一；开启后完全覆盖旧档位机制</small></h3><div class="tunable-fields">${gradeRatioControl(t)}</div></section>`
-  +group('钓获礼包','钓上鱼当场开箱，奖励直接进背包并播报',['loot_box_enabled','loot_box_chance','loot_box_trophy_guarantee'])
-  +group('聊天通知','跑鱼提示与上钩播报分别设置；保存后最多 30 秒生效',['fish_escape_taunt','fish_hooked_chat'])
-  +group('限时活动','同一时间只允许开启一个活动 · 分支 ID 可在下方任意组合，开关决定挂到新年还是周年面板 · 改完都要完整退出游戏重登',['event_newyear_enabled','event_anniversary_enabled','event_branches','event_anniversary_end_unix']);
+
+ const group=(title,sub,keys,pageId)=>'<section class="tunable-group" data-page="'+pageId+'"><h3>'+esc(title)+'<small style="font-weight:400;margin-left:8px;color:var(--muted)">'+esc(sub)+'</small></h3><div class="tunable-fields">'+keys.map(field).join('')+'</div></section>';
+ // 三页分组：按"谁在用、什么时候用"归类，各自是独立场景。
+ // 1) 玩法与钓组：调手感、调钩、调轮子磨损   2) 收益与通知：经验、掉卡、礼包、聊天
+ // 3) 活动：限时活动开关与分支
+ // 全部一次性渲染进 DOM，Tab 只切显隐（见 setParamsPage），避免缓存与重绘。
+ const PAGES=[
+  {id:'gameplay',tab:'玩法与钓组',sub:'咬钩 · 手感 · 电轮 · 摩擦片磨损',groups:[
+    ['玩法手感','咬钩快慢、饵料偏好、鱼的大小与挣扎力度',['bite_probability','bite_delay_fixed','bite_delay_scale','bite_delay_max','bite_delay_lure_max','bait_pref_scale','bait_pref_weight_shift','fish_weight_scale','fish_weight_cap','fight_power_scale','fish_pull_ln_slope','fish_pull_fallback_k','fish_initial_stamina_ratio']],
+    ['钩型与咬口','嘬饵总开关与发鱼软匹配；后台钩型倍率仍独立生效',['hook_nibble_enabled','hook_spawn_match_strength']],
+    ['电轮参数','电轮锁轮倍率与电机功率折算；改后最多 30 秒生效',['electric_locked_multiplier','electric_motor_kg_per_power']],
+    ['摩擦片磨损','泄力打滑通道的系数；改后最多 30 秒生效，只影响后续结算',['reel_slip_wear_low','reel_slip_wear_s25','reel_slip_wear_s26','reel_slip_wear_s27','reel_slip_wear_s28','reel_slip_wear_max','reel_slip_calibration_seconds','reel_slip_deadband_ratio']],
+    ['受力磨损速率','轮件/竿件/前导按搏鱼受力秒扣磨损的速率；0=关通道',['wear_stress_oil_per_s','wear_stress_gear_per_s','wear_stress_bearing_per_s','wear_stress_spool_per_s','wear_stress_guides_per_s','wear_stress_rodblank_per_s','wear_leader_per_stress_sec']],
+    ['负载上报节拍','14/8 负载上报折算受力秒的口径；改后最多 30 秒生效',['reel_load_tick_seconds','reel_load_max_tick_seconds']],
+  ]},
+  {id:'reward',tab:'收益与通知',sub:'经验 · 掉卡 · 礼包 · 档位 · 聊天',groups:[
+    ['经验与结算','改后只对新结算的鱼生效，已入护的不重算',['xp_gain','release_xp_ratio']],
+    ['钓获掉卡','本地自定概率；最多 30 秒生效，重连或重复结算不补抽',['card_drop_normal','card_drop_star','card_drop_blue','card_drop_rare_scale']],
+    ['钓获礼包','钓上鱼当场开箱，奖励直接进背包并播报',['loot_box_enabled','loot_box_chance','loot_box_trophy_guarantee']],
+    ['聊天通知','跑鱼提示与上钩播报分别设置；保存后最多 30 秒生效',['fish_escape_taunt','fish_hooked_chat']],
+  ],
+  spawnCard:true},
+  {id:'event',tab:'限时活动',sub:'新年 · 周年 · 分支与结束时间',groups:[
+    ['限时活动','同一时间只允许开启一个活动 · 分支 ID 可在下方任意组合，开关决定挂到新年还是周年面板 · 改完都要完整退出游戏重登',['event_newyear_enabled','event_anniversary_enabled','event_branches','event_anniversary_end_unix']],
+  ]},
+ ];
+ // 保留上次停留的子页；首次进入默认第一页
+ const cur=PARAMS_PAGE&&PAGES.some(p=>p.id===PARAMS_PAGE)?PARAMS_PAGE:PAGES[0].id;
+ PARAMS_PAGE=cur;
+ $('#paramsTabs').innerHTML=PAGES.map(p=>
+   `<button class="params-tab${p.id===cur?' on':''}" data-page="${p.id}" onclick="setParamsPage('${p.id}')"${p.id===cur?' aria-current="page"':''}>${esc(p.tab)}<small>${esc(p.sub)}</small></button>`).join('');
+ $('#paramsBody').innerHTML=PAGES.map(p=>
+   p.groups.map(g=>group(g[0],g[1],g[2],p.id)).join('')
+   + (p.spawnCard ? `<section class="tunable-group" data-page="${p.id}"><h3>发鱼模式<small style="font-weight:400;margin-left:8px;color:var(--muted)">档位比例 · 鱼猎四阶段 · 两档制（底浮）三选一；选中哪种就显示哪组的权重设置</small></h3><div class="tunable-fields">${spawnModeControl(t)}</div></section>` : '')
+ ).join('');
+ // 首屏按当前页做一次显隐（分组是全量渲染的）
+ setParamsPage(cur);
+}
+// 切换参数子页：所有分组已一次性渲染进 DOM，这里只切显隐，不重新拉接口也不再重绘。
+function setParamsPage(id){
+  PARAMS_PAGE=id;
+  document.querySelectorAll('#paramsTabs .params-tab').forEach(b=>{
+    const on=b.dataset.page===id;
+    b.classList.toggle('on',on);
+    if(on)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('#paramsBody .tunable-group').forEach(g=>{
+    g.style.display=g.dataset.page===id?'':'none';
+  });
 }
 async function saveEventSwitch(key,val){
   await api('/api/tunables',{method:'POST',body:JSON.stringify({key,value:String(val)})});
@@ -713,12 +858,6 @@ async function saveTunable(key){
 async function resetTunable(key,def){
   $('#tun_'+key).value=def;
   await saveTunable(key);
-}
-async function saveTunableRaw(key){
-  const v=$('#tun_'+key).value.trim();
-  await api('/api/tunables',{method:'POST',body:JSON.stringify({key,value:v})});
-  toast('已保存，最多 30 秒生效');
-  await loadTunables();
 }
 // 危险操作统一确认弹窗：标题说动作、正文说后果、固定提示写审计、确认键红底
 let CONFIRM_CB=null;
@@ -837,13 +976,6 @@ function renderPlayerTab(){
       <div class="field"><label>银行（分）</label><input id="pf_bank" type="number" value="${p.bank}"></div>
       <div class="field"><label>会员</label><select id="pf_membership"><option value="0" ${p.membership? '':'selected'}>普通</option><option value="1" ${p.membership===1? 'selected':''}>限时高级会员</option><option value="2" ${p.membership===2? 'selected':''}>永久会员</option></select></div>
       <div class="field span2"><label>会员到期</label><input id="pf_membership_exp" type="datetime-local" value="${localInput(p.membership_exp)}"></div>
-    </div><div class="form-grid" style="margin-top:12px">
-      <div class="field"><label>传送 X</label><input id="tp_x" type="number" step="0.01" placeholder="世界坐标 X"></div>
-      <div class="field"><label>传送 Z</label><input id="tp_z" type="number" step="0.01" placeholder="世界坐标 Z"></div>
-      <div class="field"><label>场景 loc（可选）</label><input id="tp_loc" placeholder="loc1_02"></div>
-      <div class="field"><label>钓点（可选）</label><input id="tp_spot" type="number" min="0" value="0"></div>
-      <div class="field"><label>保持秒数</label><input id="tp_hold" type="number" min="10" value="600"></div>
-      <div class="field" style="display:flex;align-items:flex-end"><button class="btn alt" onclick="teleportPlayer()">坐标传送</button></div>
     </div><p class="muted" id="playerHappyHour">${happyHourText(p.happy_hour)}</p><div class="actions"><button class="btn good" onclick="saveProfile()">保存档案与货币</button><button class="btn alt" onclick="selectPlayer(${p.uid})">放弃修改</button></div>`;
   }
   if(PLAYER_TAB==='items')renderItems();
@@ -914,13 +1046,6 @@ async function saveProfile(){
   }
   await api('/api/players/update',{method:'POST',body:JSON.stringify(body)});toast('已保存，在线玩家立即收到刷新');await sleep(400);await selectPlayer(PLAYER.uid);
 }
-async function teleportPlayer(){
-  const x=parseFloat($('#tp_x').value), z=parseFloat($('#tp_z').value);
-  if(!Number.isFinite(x)||!Number.isFinite(z)){toast('请填写 X 和 Z 坐标','bad');return;}
-  const body={uid:PLAYER.uid,x,z,loc:$('#tp_loc').value.trim(),spot:+$('#tp_spot').value||0,hold_sec:+$('#tp_hold').value||600};
-  await api('/api/players/teleport',{method:'POST',body:JSON.stringify(body)});
-  toast('坐标传送已下发：服务端按新坐标判定鱼群，画面不移动');
-}
 function renderItems(){
   const grantButton=GRANT_ITEM_UI_ENABLED?'<button class="btn" onclick="showGrantItem()">+ 发放物品</button>':'';
   $('#playerTabBody').innerHTML=`<div class="toolbar"><input class="grow" id="itemFilter" placeholder="筛选 item_id / 名称 / GUID" value="${esc(ITEM_FILTER)}" oninput="ITEM_FILTER=this.value;renderItemRows()">${grantButton}</div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>物品</th><th>类型</th><th>容器</th><th>数量</th><th>耐久</th><th>GUID</th><th></th></tr></thead><tbody id="itemRows"></tbody></table></div>`;
@@ -955,7 +1080,30 @@ function renderSkills(){
 async function saveSkillAvail(){const points=Math.max(0,Math.floor(+$('#skillAvail').value||0));await api('/api/players/skills/points',{method:'POST',body:JSON.stringify({uid:PLAYER.uid,points})});toast('已保存，在线玩家立即收到刷新');await sleep(500);await selectPlayer(PLAYER.uid);setPlayerTab('skills')}
 async function saveSkill(id){const points=+$('#sk_'+id).value;await api('/api/players/skills/update',{method:'POST',body:JSON.stringify({uid:PLAYER.uid,skill_id:id,points})});toast('已保存，在线玩家立即收到刷新');await sleep(500);await selectPlayer(PLAYER.uid);setPlayerTab('skills')}
 async function resetSkills(){askConfirm('清空技能熟练度','把该玩家所有钓鱼技能熟练度设为 0%，不可恢复。',async()=>{for(const s of PLAYER.skills||[])await api('/api/players/skills/update',{method:'POST',body:JSON.stringify({uid:PLAYER.uid,skill_id:s.skill_id,points:0})});toast('已清空熟练度，见审计日志');await selectPlayer(PLAYER.uid);setPlayerTab('skills')})}
-function renderPlayerMail(){const rows=PLAYER.mails||[];$('#playerTabBody').innerHTML=`<div class="table-wrap"><table><thead><tr><th>ID</th><th>正文</th><th>类型</th><th>状态</th><th>时间</th></tr></thead><tbody>${rows.map(m=>`<tr><td>${m.id}</td><td style="white-space:normal">${esc(m.text||'(附件邮件)')}</td><td>${m.kind?'附件':'文本'}</td><td>${m.read?'<span class="pill">已读</span>':'<span class="pill ok">未读</span>'}</td><td>${timeText(m.created_ts)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">邮箱为空</td></tr>'}</tbody></table></div><div class="actions"><button class="btn" onclick="prefillMail(${PLAYER.uid})">给该玩家发邮件</button></div>`}
+function renderPlayerMail(){
+  // 注意：服务端 MailList(uid, false) 返回全部邮件，含已读；read 列即玩家侧未读状态。
+  const rows=PLAYER.mails||[];
+  $('#playerTabBody').innerHTML=`<div class="table-wrap"><table><thead><tr><th>ID</th><th>正文</th><th>类型</th><th>状态</th><th>时间</th><th></th></tr></thead><tbody>${rows.map(m=>`<tr><td>${m.id}</td><td style="white-space:normal">${esc(m.text||'(附件邮件)')}</td><td>${m.kind?'附件':'文本'}</td><td>${m.read?'<span class="pill">已读</span>':'<span class="pill ok">未读</span>'}</td><td>${timeText(m.created_ts)}</td><td><button class="btn bad sm" onclick="deleteMail(${m.id})">删除</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty">邮箱为空</td></tr>'}</tbody></table></div><div class="actions"><button class="btn" onclick="prefillMail(${PLAYER.uid})">给该玩家发邮件</button></div>`;
+}
+async function deleteMail(id){
+  // 用于清理"领不出来"的坏邮件（附件物品不存在/数量超限等）。
+  // 玩家自己删不掉这类信，只能由服主删掉后重发正确的。
+  if(!confirm('确定删除这封邮件？附件会一并丢弃，且不可恢复。'))return;
+  try{
+    await api('/api/players/mail/delete',{method:'POST',body:JSON.stringify({uid:PLAYER.uid,ids:[id]})});
+  }catch(e){
+    toast('删除失败：'+e.message,'bad');
+    return;
+  }
+  toast('已删除，约 2 秒内同步');
+  // 停留在邮箱 tab 原地刷新，不要跳回档案页打断服主操作。
+  try{
+    PLAYER=await api('/api/players/detail?uid='+PLAYER.uid);
+    renderPlayerDetail();
+  }catch(e){
+    toast('刷新失败：'+e.message,'bad');
+  }
+}
 async function kickPlayer(){askConfirm('踢下线','把该玩家从服务器断开，可随时重新登录。',async()=>{await api('/api/players/kick',{method:'POST',body:JSON.stringify({uid:PLAYER.uid})});toast('已踢下线，见审计日志')})}
 async function toggleBan(){const banned=!PLAYER.banned;askConfirm(banned?'封禁玩家':'解除封禁',banned?'该玩家将无法登录游戏。':'该玩家恢复登录资格。',async()=>{await api('/api/players/ban',{method:'POST',body:JSON.stringify({uid:PLAYER.uid,banned})});toast(banned?'已封禁，见审计日志':'已解封，见审计日志');await selectPlayer(PLAYER.uid)})}
 const debounceTimers={};
@@ -1207,7 +1355,15 @@ function renderAttachments(){
 }
 async function sendMail(){
   const uid=+$('#mailUid').value,text=$('#mailText').value.trim();if(!uid)return toast('请填写收件人 UID','bad');if(!text&&!MAIL_ATTACH.length)return toast('正文和附件不能都为空','bad');
-  await api('/api/mail/send',{method:'POST',body:JSON.stringify({uid,text,items:MAIL_ATTACH.map(x=>({item_id:x.item_id,qty:+x.qty||1}))})});toast('已下发，约 2 秒内到达');MAIL_ATTACH=[];renderAttachments();
+  // 后端会在入队前校验附件（物品是否存在、组合包包数是否超上限）。
+  // 校验失败必须当场显示原因，否则服主以为发出去了，玩家却永远领不出来。
+  try{
+    await api('/api/mail/send',{method:'POST',body:JSON.stringify({uid,text,items:MAIL_ATTACH.map(x=>({item_id:x.item_id,qty:+x.qty||1}))})});
+  }catch(e){
+    toast('发送失败：'+e.message,'bad');
+    return;
+  }
+  toast('已下发，约 2 秒内到达');MAIL_ATTACH=[];renderAttachments();
 }
 function previewMail(){const uid=$('#mailUid').value||'未填写';$('#mailPreview').className='';$('#mailPreview').innerHTML=`<div style="padding:14px;border:1px solid var(--line);border-radius:12px;background:#0b1623"><div class="muted">收件人 UID ${esc(uid)}</div><div style="margin:10px 0;white-space:pre-wrap">${esc($('#mailText').value||'(无正文)')}</div><hr style="border:0;border-top:1px solid var(--line)"><div class="muted">附件 ${MAIL_ATTACH.length} 件</div>${MAIL_ATTACH.map(x=>`<div class="pill" style="margin:5px 5px 0 0">${esc(x.name||x.item_id)} × ${x.qty}</div>`).join('')}</div>`}
 function mailTemplate(name){const map={'补偿':'管理员补偿\n\n因近期服务器问题给您带来的不便，特此补偿以下物品，请查收。','活动奖励':'活动奖励\n\n感谢参与本次服务器活动！奖励已随邮件附上。','测试':'测试邮件\n\n这是一封来自管理后台的测试邮件。'};$('#mailText').value=map[name]||map['测试'];previewMail()}

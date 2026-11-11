@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,7 +430,7 @@ func TestKitchenEatFreeMealCooldown(t *testing.T) {
 	if row, err := db.EnsurePlayerCondition(ctx0, uid); err != nil || row.Secondary != 1.0 {
 		t.Fatalf("首次进食应恢复饱食度: %+v %v", row, err)
 	}
-	// 模拟随后的衰减，同游戏日二次进食回结果码 16 且不改状态。
+	// 模拟随后的衰减，同游戏日二次进食回结果码 127 且不改状态。
 	if err := db.UpsertPlayerCondition(ctx0, store.PlayerCondition{
 		UID: uid, Primary: 0.5, Secondary: 0.5, Comfort: 1.0, UpdatedTS: future,
 	}); err != nil {
@@ -438,11 +439,16 @@ func TestKitchenEatFreeMealCooldown(t *testing.T) {
 	second := &Ctx{Sess: sess, Main: 3, Sub: 13, CallID: 61, ExpectResponse: true,
 		Log: logging.Discard(), replyCapture: &ctxReplyCapture{}}
 	if body, handled := hKitchenEat(second); !handled || body != nil {
-		t.Fatalf("同游戏日二次进食应回结果码 16: handled=%v body=%v", handled, body)
+		t.Fatalf("同游戏日二次进食应回结果码 127: handled=%v body=%v", handled, body)
 	}
-	_, present, _, failure := second.replyCapture.snapshot()
+	env, present, _, failure := second.replyCapture.snapshot()
 	if !present || !failure {
-		t.Fatalf("同游戏日二次进食应弹官服文案(结果码 16): present=%v failure=%v", present, failure)
+		t.Fatalf("同游戏日二次进食应弹官服文案(结果码 127): present=%v failure=%v", present, failure)
+	}
+	// 失败信封末尾必须是 f2="127"（回 16 会被客户端弹成 ORE16 内部错误）。
+	wantF2 := fmt.Sprintf("\x03\x00\x00\x00%d", operationResultFoodAidOnceADay)
+	if !strings.HasSuffix(string(env), wantF2) {
+		t.Fatalf("f2 应为 %q，信封尾部不匹配: %q", strconv.Itoa(operationResultFoodAidOnceADay), env)
 	}
 	if row, err := db.EnsurePlayerCondition(ctx0, uid); err != nil || row.Secondary != 0.5 {
 		t.Fatalf("冷却期内不应恢复饱食度: %+v %v", row, err)

@@ -160,7 +160,7 @@ func TestLootBoxConfiguredRewardsFilterUnsupportedItems(t *testing.T) {
 			t.Fatalf("seed: %v", err)
 		}
 	}
-	mustExec(`INSERT INTO item_def(numeric_id,item_id,category,kind,brand,attrs_json) VALUES(900007,'loot_bad_gift',73,'gift','','{}')`)
+	mustExec(`INSERT INTO item_def(numeric_id,item_id,category,kind,brand,attrs_json) VALUES(900007,'loot_bad_gift',999,'gift','','{}')`)
 	mustExec(`INSERT INTO item_def(numeric_id,item_id,category,kind,brand,attrs_json) VALUES(900008,'loot_bad_wallet',43,'wallet','','{}')`)
 	mustExec(`INSERT INTO item_def(numeric_id,item_id,category,kind,brand,attrs_json) VALUES(900009,'loot_good_bait',27,'bait','','{}')`)
 	mustExec(`INSERT INTO kv(k,v) VALUES('loot_box_defs','[{"id":"b","name":"礼包","chance":1.0,"carrier_item":"loot_bad_gift","rewards":[{"item_id":"loot_bad_gift","qty":1,"weight":100},{"item_id":"loot_bad_wallet","qty":1,"weight":100},{"item_id":"loot_good_bait","qty":1,"weight":1}]}]')`)

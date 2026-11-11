@@ -82,12 +82,12 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("POST /api/players/membership", auth(s.handlePlayerMembership))
 	mux.HandleFunc("POST /api/players/grant", auth(s.handleGrantItem))
 	mux.HandleFunc("POST /api/players/items/delete", auth(s.handlePlayerItemDelete))
+	mux.HandleFunc("POST /api/players/mail/delete", auth(s.handlePlayerMailDelete))
 	mux.HandleFunc("POST /api/players/keepnet/add", auth(s.handlePlayerKeepnetAdd))
 	mux.HandleFunc("POST /api/players/keepnet/delete", auth(s.handlePlayerKeepnetDelete))
 	mux.HandleFunc("POST /api/players/skills/update", auth(s.handlePlayerSkillUpdate))
 	mux.HandleFunc("POST /api/players/skills/points", auth(s.handlePlayerSkillPoints))
 	mux.HandleFunc("POST /api/players/kick", auth(s.handleKick))
-	mux.HandleFunc("POST /api/players/teleport", auth(s.handleTeleport))
 	mux.HandleFunc("POST /api/players/ban", auth(s.handleBan))
 	mux.HandleFunc("GET /api/catalog/items", auth(s.handleCatalogItems))
 	mux.HandleFunc("GET /api/stores", auth(s.handleStores))
@@ -99,6 +99,8 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("POST /api/fish/config", auth(s.handleFishConfigSave))
 	mux.HandleFunc("POST /api/fish/config/reset", auth(s.handleFishConfigReset))
 	mux.HandleFunc("GET /api/fish/pool", auth(s.handleFishPool))
+	mux.HandleFunc("GET /api/fish/spawn_mode", auth(s.handleSpawnModeGet))
+	mux.HandleFunc("POST /api/fish/spawn_mode", auth(s.handleSpawnModeSet))
 	mux.HandleFunc("GET /api/hooks/profiles", auth(s.handleHookProfiles))
 	mux.HandleFunc("POST /api/hooks/profiles", auth(s.handleHookProfileSave))
 	mux.HandleFunc("GET /api/bait/prefs", auth(s.handleBaitPrefs))
@@ -308,6 +310,45 @@ func validateEventBranches(value string) error {
 	return nil
 }
 
+// tunableRange 是数值型 tunable 的合法区间 [min, max]。
+// 下限不是随手取的：它要保证「这个值在数字层面真的有意义」，而不只是「>0 合法」。
+type tunableRange struct {
+	min float64
+	max float64
+}
+
+// reelWearTunableRanges 是摩擦片磨损参数的合法区间。
+//
+// 下限的来由（踩过的坑）：磨损率直接乘进制动力，而制动力是 38.1kg 量级，
+// float64 在这个量级的半数舍入门槛约 3.553e-15 kg。单次 tick 的减量若小于它，
+// 减完之后 cur-wear 仍等于 cur —— 参数看着生效、实际一分不磨，属于静默失效。
+// 反算出手理论最小档位率约 8.39e-17，这里取 1e-12（约 1.2 万倍余量）作为硬下限，
+// 既挡住无意义的小值，又给调参留足空间。
+var reelWearTunableRanges = map[string]tunableRange{
+	// 六个档位的单次磨损率：低于 1e-12 会被 float64 精度吃掉。
+	"reel_slip_wear_low": {min: 1e-12, max: 1},
+	"reel_slip_wear_s25": {min: 1e-12, max: 1},
+	"reel_slip_wear_s26": {min: 1e-12, max: 1},
+	"reel_slip_wear_s27": {min: 1e-12, max: 1},
+	"reel_slip_wear_s28": {min: 1e-12, max: 1},
+	"reel_slip_wear_max": {min: 1e-12, max: 1},
+	// 校准秒数是除数：太小时每小时磨损率被放大到失真。缺省 41.7s 对齐官服实测。
+	"reel_slip_calibration_seconds": {min: 0.01, max: 3600},
+	// 打滑门槛倍率：1=只要超泄力就磨（旧口径），>1 给死区（官服 1.04× 零磨损）。
+	"reel_slip_deadband_ratio": {min: 1, max: 10},
+	// 受力磨损速率（百分点/受力秒）：0 关通道；上限 0.01%/s 已比官服量级快 25 倍。
+	"wear_stress_oil_per_s":      {min: 0, max: 0.01},
+	"wear_stress_gear_per_s":     {min: 0, max: 0.01},
+	"wear_stress_bearing_per_s":  {min: 0, max: 0.01},
+	"wear_stress_spool_per_s":    {min: 0, max: 0.01},
+	"wear_stress_guides_per_s":   {min: 0, max: 0.01},
+	"wear_stress_rodblank_per_s": {min: 0, max: 0.01},
+	"wear_leader_per_stress_sec": {min: 0, max: 0.01},
+	// 负载节拍：太小会让每次上报折算成极短时长，磨损几乎不涨。
+	"reel_load_tick_seconds":     {min: 0.01, max: 600},
+	"reel_load_max_tick_seconds": {min: 0.01, max: 600},
+}
+
 func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key   string `json:"key"`
@@ -317,14 +358,9 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "参数错误")
 		return
 	}
-	switch req.Key {
-	case "fish_ecology_enabled", "fish_bait_rules_enabled", "fish_distribution_enabled",
-		"fish_weather_enabled", "happy_hour_enabled", "grade_ratio_enabled", "hook_nibble_enabled",
-		"event_anniversary_enabled", "event_newyear_enabled":
-		if req.Value != "0" && req.Value != "1" {
-			httpError(w, 400, "开关只能为 0 或 1")
-			return
-		}
+	if (req.Key == "fish_ecology_enabled" || req.Key == "fish_bait_rules_enabled" || req.Key == "fish_distribution_enabled" || req.Key == "fish_weather_enabled" || req.Key == "happy_hour_enabled" || req.Key == "grade_ratio_enabled" || req.Key == "fish_hunt_enabled" || req.Key == "two_stage_hunt_enabled" || req.Key == "hook_nibble_enabled" || req.Key == "event_anniversary_enabled" || req.Key == "event_newyear_enabled") && req.Value != "0" && req.Value != "1" {
+		httpError(w, 400, "开关只能为 0 或 1")
+		return
 	}
 	if req.Key == "hook_spawn_match_strength" {
 		v, err := strconv.ParseFloat(req.Value, 64)
@@ -340,9 +376,28 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if strings.HasPrefix(req.Key, "two_stage_daily_") || strings.HasPrefix(req.Key, "two_stage_baited_") {
+		v, err := strconv.ParseFloat(req.Value, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			httpError(w, 400, "两档制权重必须是非负数字")
+			return
+		}
+	}
 	if req.Key == "event_branches" {
 		if err := validateEventBranches(req.Value); err != nil {
 			httpError(w, 400, err.Error())
+			return
+		}
+	}
+	// 摩擦片磨损相关参数：必须是有限数且落在 [min, max]。
+	// 下限不是保守估计：低于它磨损量会被 float64 精度吃掉，参数静默失效。
+	// 见 specs/changes/reel-wear-tunables。
+	if rng, ok := reelWearTunableRanges[req.Key]; ok {
+		v, err := strconv.ParseFloat(strings.TrimSpace(req.Value), 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < rng.min || v > rng.max {
+			httpError(w, 400, fmt.Sprintf("该参数必须在 %s ~ %s 之间（下限低于精度门槛会静默失效）",
+				strconv.FormatFloat(rng.min, 'g', -1, 64),
+				strconv.FormatFloat(rng.max, 'g', -1, 64)))
 			return
 		}
 	}
@@ -365,6 +420,56 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	// 通知主服立即刷新运行参数；后台也会按缓存周期生效。
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "reload_tunables"}))
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ---- 发鱼模式 ----
+
+// spawnModeFor 推导当前发鱼模式。三开关互斥由后台维护；直改数据库出现的
+// 组合按 grade_ratio > two_stage > fish_hunt 的优先级解释，全 0 是旧采样路径。
+func spawnModeFor(t map[string]string) string {
+	if t["grade_ratio_enabled"] == "1" {
+		return "grade_ratio"
+	}
+	if t["two_stage_hunt_enabled"] == "1" {
+		return "two_stage"
+	}
+	if t["fish_hunt_enabled"] == "1" {
+		return "fish_hunt"
+	}
+	return "legacy"
+}
+
+func (s *Server) handleSpawnModeGet(w http.ResponseWriter, r *http.Request) {
+	t, err := s.db.TunableList(r.Context())
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"mode": spawnModeFor(t)})
+}
+
+func (s *Server) handleSpawnModeSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, 400, "参数错误")
+		return
+	}
+	switch req.Mode {
+	case "grade_ratio", "fish_hunt", "two_stage":
+	default:
+		httpError(w, 400, "发鱼模式只能是 grade_ratio、fish_hunt 或 two_stage")
+		return
+	}
+	if err := s.db.SpawnModeSet(r.Context(), req.Mode, adminOf(r)); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "spawn_mode", "mode", req.Mode)
+	// 通知主服立即刷新运行参数；后台也会按缓存周期生效。
+	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "reload_tunables"}))
+	writeJSON(w, map[string]any{"ok": true, "mode": req.Mode})
 }
 
 // ---- 玩家管理 ----
@@ -620,28 +725,6 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "kick", "uid": req.UID}))
 	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "kick", strconv.FormatInt(req.UID, 10), "")
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (s *Server) handleTeleport(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		UID     int64   `json:"uid"`
-		X       float64 `json:"x"`
-		Z       float64 `json:"z"`
-		Loc     string  `json:"loc"`
-		Spot    uint64  `json:"spot"`
-		HoldSec int64   `json:"hold_sec"`
-	}
-	if err := readJSON(r, &req); err != nil || req.UID == 0 {
-		httpError(w, 400, "参数错误")
-		return
-	}
-	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{
-		"op": "teleport", "uid": req.UID, "x": req.X, "z": req.Z,
-		"loc": strings.TrimSpace(req.Loc), "spot": req.Spot, "hold_sec": req.HoldSec,
-	}))
-	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "teleport", strconv.FormatInt(req.UID, 10),
-		fmt.Sprintf("x=%.2f z=%.2f loc=%s spot=%d hold=%ds", req.X, req.Z, req.Loc, req.Spot, req.HoldSec))
 	writeJSON(w, map[string]any{"ok": true})
 }
 

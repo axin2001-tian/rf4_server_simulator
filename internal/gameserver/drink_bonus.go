@@ -39,58 +39,44 @@ func (sess *Session) updateDrinkBonuses(now time.Time) {
 	}
 }
 
-// drinkXPBonusTx 在首次结算事务内冻结酒兴经验，回执重放不重新计时或计算。
+// drinkXPBonusTx 在首次结算事务内冻结酒兴经验：每瓶按自身剩余时长独立衰减，
+// 倍率相加后作为一条 kind 55；回执重放不重新计时或计算。
 func (s *Server) drinkXPBonusTx(ctx context.Context, tx *sql.Tx, uid, baseXP int64, now time.Time) (*catchXPBonus, error) {
 	states, err := store.AdvanceDrinkBonusesTx(ctx, tx, uid, s.drinkRunKey(), now,
 		s.drinkOnline(uid), s.drinkMaxGap())
 	if err != nil {
 		return nil, err
 	}
-	var best catchXPBonus
+	var totalRate float64
+	var top catchXPBonus
 	for _, state := range states {
-		duration := time.Duration(state.DurationMillis) * time.Millisecond
 		remaining := time.Duration(state.RemainingMillis) * time.Millisecond
-		// 酒类加成按商店售价折算：喝的酒越贵，经验加成越高。
-		peak := 0.0
-		if silver, gold := drinkPriceTx(ctx, tx, state.SourceGUID); silver > 0 || gold > 0 {
-			peak = drinkPeakByPrice(silver, gold)
-		} else if state.Peak > 0 {
-			peak = state.Peak
-		} else if rule, ok := drinkRuleForCategory(state.Category); ok {
-			peak = rule.Peak
-		}
-		rate := drinkRateForPeak(peak, duration, remaining)
-		if rate <= 0 && state.Peak <= 0 {
+		rate := drinkRateFor(state.Peak, time.Duration(state.DurationMillis)*time.Millisecond, remaining)
+		if state.Peak <= 0 {
 			// 兼容旧行：迁移新增的 peak 默认为 0，回退类别默认峰值与时长。
 			rate = drinkRate(state.Category, remaining)
 		}
-		if rate > best.Multiplier {
+		if rate <= 0 {
+			continue
+		}
+		totalRate += rate
+		if rate > top.Multiplier {
 			guid := state.SourceGUID
 			if guid == "" {
 				guid = zeroGUID
 			}
-			best = catchXPBonus{Kind: 55, GUID: guid, Multiplier: rate}
+			top = catchXPBonus{Kind: 55, GUID: guid, Multiplier: rate}
 		}
 	}
-	best.XP = int64(math.Round(float64(baseXP) * best.Multiplier))
-	if best.XP <= 0 {
+	if totalRate <= 0 {
 		return nil, nil
 	}
-	return &best, nil
-}
-
-// drinkPriceTx 读取那瓶酒在商店里的售价（银币、金币）。
-func drinkPriceTx(ctx context.Context, tx *sql.Tx, guid string) (int64, int64) {
-	if tx == nil || guid == "" || guid == zeroGUID {
-		return 0, 0
+	bonus := catchXPBonus{Kind: 55, GUID: top.GUID, Multiplier: totalRate}
+	bonus.XP = int64(math.Round(float64(baseXP) * totalRate))
+	if bonus.XP <= 0 {
+		return nil, nil
 	}
-	var silver, gold sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT p.silver, p.gold FROM item i
-		LEFT JOIN item_price p ON p.item_id=i.item_id WHERE i.guid=?`, guid).Scan(&silver, &gold)
-	if err != nil {
-		return 0, 0
-	}
-	return silver.Int64, gold.Int64
+	return &bonus, nil
 }
 
 func (s *Server) runDrinkUseReceiptCleanup(stop <-chan struct{}, done chan<- struct{}) {

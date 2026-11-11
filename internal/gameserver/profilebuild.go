@@ -98,13 +98,13 @@ func buildStats322W(wNow int64) *proto.Value {
 
 // build745 构造通行证/欢乐时光状态块。
 // f0=状态枚举、f1=欢乐时光结束的世界游戏分钟坐标、f2=结束墙钟（FILETIME）。
-// 客户端主页倒计时（RUIHappyHourWidget.kanomlofomo）实际算法是
-//   f1 − (f13.f0 + 档案到达后的真实分钟)
-// 其中 f13.f0 就是 BuildStats322W 下发的连续世界游戏分钟 W（客户端
-// hncnmlgnhjm.nfegbblgion 把 f13.f0 交给 nnfmkefpbdi.mmpnhgcccop），
-// 因此 f1 必须写成 W + 期望剩余真实分钟，f2 只被状态 2「下一场」使用。
-// 此前 f1 直接写剩余分钟、f2 写会员到期，倒计时永远为负，所以恒显示
-// 「剩余不到一分钟」。
+// 客户端主页倒计时（RUIHappyHourWidget.kanomlofomo）按
+//
+//	f1 − (f13.f0 + 档案到达后的真实分钟)
+//
+// 计算，f13.f0 是 BuildStats322W 下发的连续世界游戏分钟 W（客户端
+// hncnmlgnhjm.nfegbblgion 转交 nnfmkefpbdi.mmpnhgcccop），因此 f1 必须写成
+// W + 期望剩余真实分钟；f2 只被状态 2「下一场」使用。
 func build745(hhState int, hhMinutes int64, hhEnd uint64) *proto.Value {
 	return wiregen.MustMakeObj("dnijhkbdfan", map[int]*proto.Value{
 		0: proto.U32(uint32(hhState)),
@@ -238,7 +238,8 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 	// 把 f16 拷进 ifbfdldbana.gebeadddmlp；RUIUserInfoWidget（等级旁星号）
 	// 和 ddkpcmhdfdb.fgnijlofipp 都显示该值，24/19 的 f5 是同一字段。官服
 	// 语义按鱼种去重：钓到过 grade>=3（重量稀有/超稀有）的鱼种各计一次，
-	// 不等于统计页 3/2 按条数的稀有渔获计数。
+	// 不等于统计页 3/2 按条数的稀有渔获计数。「钓到过」= catch_log 里有一行，
+	// 放生的鱼也算（结算 14/4 就落库，入护只把 source 抬成 'keep'）。
 	rareCatches, rareErr := s.DB.RareSpeciesCount(ctx, uid, 3)
 	if rareErr != nil {
 		s.log.Warn("奖杯鱼种数读取失败，按 0 下发", "uid", uid, "err", rareErr)
@@ -246,22 +247,30 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 
 	// f24(pdomjfdnghk/dlgnjgfjcaj).emegkdcimkp 是欢乐时光状态枚举（客户端
 	// RUIHappyHourWidget 的 0~4 分支）：0=未开放（显示"需要高级会员"）、
-	// 1=已就绪、2=下一场时间、3=进行中（按剩余分钟倒计时）、4=今日已结束。
-	// 客户端显示的真实剩余分钟 = (f1 − W) / 24：f1 与世界时钟同为游戏分钟坐标，
-	// 游戏内 24 分钟才走 1 真实分钟，所以这里按 24 倍写入。
+	// 1=已就绪（无倒计时）、2=下一场时间、3=进行中（按剩余分钟倒计时）、
+	// 4=今日已结束。客户端显示的真实剩余分钟 = (f1 − W) / 24：f1 与世界时钟
+	// 同为游戏分钟坐标，游戏内 24 分钟才走 1 真实分钟，所以这里按 24 倍写入。
+	// 客户端没有"不限时长"状态：状态 3 的文案只有"{n} 分钟剩余"与"剩余不到
+	// 一分钟"（本地化 kDlg_CP_HappyHour_Status_Activated/Activated2），因此永久
+	// 会员不能下发有限倒计时，改用状态 1（就绪）；总开关关闭时用 4（不进行）。
 	hhState := 0
 	hhMinutes := int64(0)
 	hhEnd := pass745F2
 	if hh, hhErr := s.DB.GetHappyHourStatus(ctx, uid, time.Now()); hhErr == nil && hh.Qualified {
-		hhMinutes = wNow + (hh.RemainingSeconds+59)/60*24
-		if hhMinutes > math.MaxUint32 {
-			hhMinutes = math.MaxUint32
-		}
-		hhState = 3
-		if hh.Unlimited {
-			hhEnd = uint64(proto.UnixToFiletime(time.Now().AddDate(100, 0, 0).Unix()))
-		} else if hh.ExpiresAt > 0 {
-			hhEnd = uint64(proto.UnixToFiletime(hh.ExpiresAt))
+		switch {
+		case !hh.Enabled:
+			hhState = 4
+		case hh.Unlimited:
+			hhState = 1
+		default:
+			hhMinutes = wNow + (hh.RemainingSeconds+59)/60*24
+			if hhMinutes > math.MaxUint32 {
+				hhMinutes = math.MaxUint32
+			}
+			hhState = 3
+			if hh.ExpiresAt > 0 {
+				hhEnd = uint64(proto.UnixToFiletime(hh.ExpiresAt))
+			}
 		}
 	}
 	return wiregen.MakeObj("ghfbofgdflm", map[int]*proto.Value{
@@ -507,6 +516,17 @@ func (s *Session) Push4_22Items(extraGUIDs []string) {
 	s.Push(4, 22, proto.Args(proto.S("61"), items...))
 }
 
+// Push4_22Trees 以官服搏鱼帧形状推送裸物品/部件子树（4/22 args("61")）。
+// 只发受力磨损涉及的零件子树，绝不重建竿/线全量树——全量重建会重建鱼实体、
+// 打断冲刺与体力阶段（见 hFishingLoad 注释）。形状依据官服搏鱼 4/22 抓包
+// （lure2 46 帧 + 底钓2 274 帧，部件作为独立对象并列，按 GUID 原位更新）。
+func (s *Session) Push4_22Trees(trees []*proto.Value) {
+	if len(trees) == 0 {
+		return
+	}
+	s.Push(4, 22, proto.Args(proto.S("61"), trees...))
+}
+
 // Push4_22ItemGUIDs 只推指定背包物品的最新树。
 // 吃饵、剪线等背包数量变化走这条通道；不要把竿/线混进背包更新。
 func (s *Session) Push4_22ItemGUIDs(guids []string) {
@@ -541,11 +561,46 @@ func (s *Session) Push4_22Full() {
 	s.Push(4, 22, proto.Args(proto.S("61"), items...))
 }
 
+// hookMountedFlag 中鱼挂竿运行位：官方真服抓包（2026-11-10/11）四钓法 9 次中鱼
+// 钩逐帧验证，hgaijieklek 一律 = 定义基值（钩 20992）| 1024。缺位时客户端钩
+// 实体不进搏鱼态，表现为浮漂无咬钩演出、左下角无搏鱼指示。
+// 钩推送形状随钓组而变：单钩/单钩组=裸钩 args(61)[131]（沉底/浮钓/海钓单钩），
+// 串钩组/拟饵 rig=ioombppcnlh 嵌套容器（海钓串钩、路亚）；flags 语义同构。
+const hookMountedFlag = uint64(1024)
+
+// markHookMounted 递归把树中所有钩对象（agedjipcnpe）的 flags 补挂竿位，
+// 兼容裸钩（沉底/浮钓/海钓单钩）与容器嵌套钩（海钓串钩/路亚 ioombppcnlh）两种形状。
+func markHookMounted(v *proto.Value) {
+	if v == nil {
+		return
+	}
+	if v.Class == "agedjipcnpe" {
+		if idx := fieldIdxByCS("agedjipcnpe", csStateEnum); idx >= 0 && idx < len(v.Fields) &&
+			v.Fields[idx].Num != nil {
+			*v.Fields[idx].Num |= hookMountedFlag
+		}
+	}
+	for _, f := range v.Fields {
+		if f.Val != nil {
+			markHookMounted(f.Val)
+		}
+	}
+	for _, it := range v.Items {
+		markHookMounted(it)
+	}
+}
+
 // Push4_22Hook 刺中后单钩同步：args("61")[131钩]。
-func (s *Session) Push4_22Hook(gears ...string) {
+// mounted=true 时钩 flags 附挂竿位（官方口径：四钓法中鱼钩均带挂竿位）。
+func (s *Session) Push4_22Hook(mounted bool, gears ...string) {
 	items, err := s.Srv.buildFightItems(s.pushCtx(), s.Userid, false, gears...)
 	if err != nil || len(items) == 0 {
 		return
+	}
+	if mounted {
+		for _, it := range items {
+			markHookMounted(it)
+		}
 	}
 	s.Push(4, 22, proto.Args(proto.S("61"), items...))
 }

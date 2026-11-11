@@ -516,9 +516,8 @@ func (s *Session) pushChatRaw(variant, kind int, text string) {
 // fishTVKv 构造 401.f4 的鱼名和重量参数。
 // 容器为 [0x03][1B len "135"][u16 count][元素...]，类型名是 wiregen typeid
 // 400 的十进制字符串 "135"；元素带 typed 对象头 [0x01][u32le 400]。
-// 键1 = 展示文本（0x14 短字符串，中文鱼名或整句文案）、键2 = 重量
-// （0x0D u32，客户端按克/公斤自适应显示）。客户端 4.0.25034 实机验证
-// 可渲染且连接稳定。
+// 键1 = 展示文本（0x14 短字符串，中文鱼名）、键2 = 重量（0x0D u32，
+// 客户端按克/公斤显示）。客户端 4.0.25034 实机验证可渲染且连接稳定。
 func fishTVKv(text string, weightG int64) *proto.Value {
 	if text == "" {
 		text = "g_tench"

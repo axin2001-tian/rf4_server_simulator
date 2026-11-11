@@ -20,22 +20,42 @@ import (
 
 // settleXpResult 保存一次钓获结算的经验分解和结算状态。
 type settleXpResult struct {
-	bonuses         []catchXPBonus
-	droppedCardGUID string
-	premiumXP       int64
-	replayed        bool
-	baseXP          int64                              // 技能倍率后的裸经验（分解中的"基础经验"）
-	totalXP         int64                              // 310.f0 = 本条鱼总经验
-	silver          int64                              // 展示用银价（catch_silver_cents 口径，不入账）
-	prevBest        int64                              // 该鱼种已有纪录重量（813.f6）
-	newLevel        int64                              // grant 后等级
-	totalXp         int64                              // grant 后累计经验
-	levelsGained    int64                              // 本次升级数（310.f1）
-	isRecord        bool                               // 是否破个人纪录
-	skillID         int64                              // 310.f2 钓法大类（1 浮钓 / 2 纺车 / 3 底钓 / 11 海钓）
-	skillGain       float64                            // 310.f3 本次实际熟练度增量
-	giftItems       []*store.Item                      // 本次结算直发的升级礼物（仅非重放；挂 801 f8 奖励列表）
-	qualChanges     map[int64]store.QualificationState // 本尾鱼带来的资格变化（重放时从回执还原）
+	bonuses          []catchXPBonus
+	droppedCardGUID  string
+	premiumXP        int64
+	replayed         bool
+	baseXP           int64         // 技能倍率后的裸经验（分解中的"基础经验"）
+	totalXP          int64         // 310.f0 = 本条鱼总经验
+	silver           int64         // 展示用银价（catch_silver_cents 口径，不入账）
+	prevBest         int64         // 该鱼种已有纪录重量（813.f6）
+	newLevel         int64         // grant 后等级
+	totalXp          int64         // grant 后累计经验
+	levelsGained     int64         // 本次升级数（310.f1）
+	isRecord         bool          // 是否破个人纪录
+	skillID          int64         // 310.f2 钓法大类（1 浮钓 / 2 纺车 / 3 底钓 / 11 海钓）
+	skillGain        float64       // 310.f3 本次实际熟练度增量
+	giftItems        []*store.Item // 本次结算直发的升级礼物（仅非重放；挂 801 f8 奖励列表）
+	rarityGifts      []*store.Item // 本次结算新发的「稀有鱼」族奖座（挂 801.f4 来源码 5）
+	superRarityGifts []*store.Item // 本次结算新发的「超级稀有鱼」族奖座（另起一行，同来源码）
+	waterwayGifts    []*store.Item // 本次结算集齐的水域奖杯（挂 801.f4 来源码 6）
+	// 两族判定时的鱼种数：811.f1 的「条数」参数。填 0 客户端会整枚跳过。
+	raritySpeciesCount      int64
+	superRaritySpeciesCount int64
+	qualChanges             map[int64]store.QualificationState // 本尾鱼带来的资格变化（重放时从回执还原）
+}
+
+// allGiftItems 汇总本次结算新发的全部礼物（升级礼物 + 两族奖座 + 水域奖杯），
+// 供 801.f8 奖励列表与响应后的 4/22 增量共用；返回新切片，不动原字段。
+func (r *settleXpResult) allGiftItems() []*store.Item {
+	if r == nil {
+		return nil
+	}
+	out := make([]*store.Item, 0, len(r.giftItems)+len(r.rarityGifts)+len(r.superRarityGifts)+len(r.waterwayGifts))
+	out = append(out, r.giftItems...)
+	out = append(out, r.rarityGifts...)
+	out = append(out, r.superRarityGifts...)
+	out = append(out, r.waterwayGifts...)
+	return out
 }
 
 // grantXpMonotonic 增加累计经验并重算等级，保证等级不下降。
@@ -228,7 +248,7 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 		return [6]int64{111, 222, 333, 444, 555, 666}
 	}
 	if st, ok := speciesFightStatics[species]; ok {
-		return s.scaleSettleStatics(st)
+		return st
 	}
 	f1, f2 := int64(1600), int64(2700)
 	if s.DB != nil {
@@ -256,25 +276,7 @@ func (s *Server) settleStatics(ctx context.Context, species string) [6]int64 {
 	f3 := int64(math.Round(float64(f2) * 1.25))
 	f4 := int64(math.Round(float64(f2) * 1.1))
 	f5 := int64(math.Round(float64(f2) * 1.2))
-	return s.scaleSettleStatics([6]int64{f0, f1, f2, f3, f4, f5})
-}
-
-// scaleSettleStatics 把标尺阈值组与 fish_weight_scale 同步缩放。
-// 鱼重按倍率放大后，结算界面标尺的达标/奖杯/蓝冠刻度必须同步放大，
-// 否则鱼重量位置远超阈值范围，客户端标尺栏标记全部挤到左端。
-// 阈值同步缩放后档位判定与标尺位置保持一致（倍率只放大重量/经验，不虚增档位）。
-func (s *Server) scaleSettleStatics(st [6]int64) [6]int64 {
-	scale := s.tunableF("fish_weight_scale", 1)
-	if scale <= 0 {
-		scale = 1
-	}
-	if scale == 1 {
-		return st
-	}
-	for i, v := range st {
-		st[i] = int64(math.Round(float64(v) * scale))
-	}
-	return st
+	return [6]int64{f0, f1, f2, f3, f4, f5}
 }
 
 // buildSettle813 构造 813 搏斗统计块：f8 是 310 经验块，f9 是 25 鱼条目。
@@ -384,6 +386,7 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 		s.notifyFishEscape(ctx.Sess, pending, "收竿跑鱼")
 	}
 	var res *settleXpResult
+	var qualCups []*store.Item
 	if hasFish {
 		// 资格事件在结算前用咬钩快照装配；判定与经验/回执在同一事务提交。
 		// 达标当尾的结算响应即带完成（增量下发），重放从回执还原同一增量。
@@ -392,6 +395,11 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 		if res == nil {
 			ctx.ReplyFailure("System.IO.IOException", "钓获结算未能保存，请重试")
 			return nil, true
+		}
+		// 本尾鱼让某分支最后一条任务达标时，整分支完成发奖杯（kv 幂等，
+		// 重放不发）；奖杯挂 801.f8 奖励列表并在响应后推 4/22。
+		if !res.replayed && len(qualChanges) > 0 {
+			qualCups = s.ensureQualificationCups(cctx, uid)
 		}
 		stats813 = s.buildSettle813(cctx, uid, pending, res)
 		profileTree, _ = s.BuildProfile307W(cctx, uid, worldTotalGameMin(time.Now()))
@@ -423,13 +431,18 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 	// 升级礼物与钓获卡片同列：礼物行来自结算直发（非重放才有）。
 	grants := proto.Args(proto.S("61"))
 	if hasFish && res != nil {
-		for _, row := range res.giftItems {
+		for _, row := range res.allGiftItems() {
 			if row == nil {
 				continue
 			}
 			if tree, terr := s.ItemToTree(cctx, row); terr == nil {
 				grants.Items = append(grants.Items, tree)
 			}
+		}
+	}
+	for _, row := range qualCups {
+		if tree, terr := s.awardItemTree(cctx, row); terr == nil {
+			grants.Items = append(grants.Items, tree)
 		}
 	}
 	if hasFish && res.droppedCardGUID != "" {
@@ -447,21 +460,60 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 			grants.Items = append(grants.Items, tree)
 		}
 	}
-	// 升级礼物行：801.f4 = 811 数组（f0=1 新级别），客户端 GameResult 弹窗
-	// 从该数组渲染"新级别礼物"卡片栈；无礼物保持 null（官服未升级样本形态）。
+	// 礼物行：801.f4 = 811 数组（args 173）。升级礼物 / 稀有鱼 / 水域奖杯走 giftRows811
+	// 的 gift811Line；分支杯自带 f4=14 投影，用 qualificationGiftLine 单独构造后作为额外
+	// 的 811 元素追加到同一个数组。客户端 GameResult 按来源码各渲染礼物卡；无礼物保持
+	// null（官服未升级样本形态）。
 	giftRows := proto.Null()
-	if hasFish && res != nil && len(res.giftItems) > 0 {
-		if rows, rerr := s.giftRows811Arg(cctx, res.newLevel, res.giftItems); rerr != nil {
-			ctx.Log.Warn("升级礼物行构造失败（801.f4 置空）", "err", rerr)
-		} else {
-			giftRows = rows
+	if hasFish && res != nil {
+		lines := make([]gift811Line, 0, 4)
+		if len(res.giftItems) > 0 {
+			lines = append(lines, gift811Line{source: giftSourceNewLevel, param: res.newLevel, items: res.giftItems})
+		}
+		// 稀有鱼 / 超级稀有鱼各一行：客户端按来源码画卡，同一次结算两族都跨档时
+		// 是两张卡（各自带「条数」参数），不能合并——合并后第二族就拿不到自己的
+		// 鱼种数，卡片说明会显示成另一族的进度。
+		if len(res.rarityGifts) > 0 {
+			lines = append(lines, gift811Line{source: giftSourceTrophyCountReached,
+				param: res.raritySpeciesCount, items: res.rarityGifts})
+		}
+		if len(res.superRarityGifts) > 0 {
+			lines = append(lines, gift811Line{source: giftSourceTrophyCountReached,
+				param: res.superRaritySpeciesCount, items: res.superRarityGifts})
+		}
+		// 水域奖杯：文案「捕获了该水域的所有稀有鱼」，没有占位参数（f1 留 1 而非 0，
+		// 避免被当成「无参数行」跳过）。
+		if len(res.waterwayGifts) > 0 {
+			lines = append(lines, gift811Line{source: giftSourceTrophyTableCollected,
+				param: 1, items: res.waterwayGifts})
+		}
+		// 实机校准开关（默认关）：把 sources 里每个码都挂一行，让玩家钓任意一尾
+		// 就能在结算界面同时看到多张卡，用来确定「捕获了数条稀有鱼」到底是几号。
+		if dbg := s.debugGiftRows(cctx, uid); len(dbg) > 0 {
+			lines = append(lines, dbg...)
+			ctx.Log.Info("801.f4 附带调试礼物行", "uid", uid, "rows", len(dbg))
+		}
+		if len(lines) > 0 {
+			if rows, rerr := s.giftRows811(cctx, lines); rerr != nil {
+				ctx.Log.Warn("礼物行构造失败（801.f4 置空）", "err", rerr)
+			} else {
+				giftRows = rows
+			}
+		}
+		// 分支杯：自带 f4=14 的裸 811 行，追加到同一个 args(811)，不替换上面各行。
+		if len(qualCups) > 0 {
+			if line, lerr := s.qualificationGiftLine(cctx, qualCups); lerr != nil {
+				ctx.Log.Warn("资格奖杯礼物行构造失败", "err", lerr)
+			} else if line != nil {
+				giftRows = append811Row(giftRows, line)
+			}
 		}
 	}
 	obj801, err := wiregen.MakeObj("caagocpofin", map[int]*proto.Value{
 		0:  f0,
 		1:  proto.U32(proto.F32Bits(float32(castProf.DistanceM))),
 		2:  proto.U32(f32Const801F2),
-		3:  build5003FromStates(qualChanges, s.buildSeason5012()),
+		3:  s.build5003FromStates(qualChanges, s.buildSeason5012()),
 		4:  giftRows,
 		5:  proto.Null(),
 		6:  f6,
@@ -503,13 +555,23 @@ func (s *Server) fishingEndSettle(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 	// 礼物 4/22 与卡片同步：801 响应发送后再更新背包缓存，避免与结算快照竞态。
-	if hasFish && res != nil && len(res.giftItems) > 0 {
-		gifts := res.giftItems
-		ctx.AfterResponse(func() {
-			for _, row := range gifts {
-				if row != nil {
-					s.pushItemUpdate(uid, row)
+	if hasFish && res != nil {
+		gifts := res.allGiftItems()
+		if len(gifts) > 0 {
+			ctx.AfterResponse(func() {
+				for _, row := range gifts {
+					if row != nil {
+						s.pushItemUpdate(uid, row)
+					}
 				}
+			})
+		}
+	}
+	if len(qualCups) > 0 {
+		cups := qualCups
+		ctx.AfterResponse(func() {
+			for _, row := range cups {
+				s.pushAwardUpdate(uid, row)
 			}
 		})
 	}

@@ -132,14 +132,14 @@ func (s *Server) resolveVendCharges(ctx context.Context, demands []craftDemand, 
 	return out, nil
 }
 
-// vendTotalPrice 按货架最低价合计 times 套的银币总额。
-// 价格读取同样必须在经济事务之外。
+// vendTotalPrice 按配料单价（货架最低价，缺价时按货架补齐同款口径估价）
+// 合计 times 套的银币总额。价格读取同样必须在经济事务之外。
 func (s *Server) vendTotalPrice(ctx context.Context, charges []vendCharge, times int64) (int64, error) {
 	var total int64
 	for _, c := range charges {
-		price, err := s.DB.ShelfPriceLowest(ctx, c.ItemID)
+		price, err := s.DB.CraftIngredientSilverPrice(ctx, c.ItemID)
 		if err != nil {
-			return 0, fmt.Errorf("配料 %s 没有货架价", c.ItemID)
+			return 0, fmt.Errorf("配料 %s 无法定价", c.ItemID)
 		}
 		q := c.Qty * times
 		if q > 0 && price > math.MaxInt64/q {
@@ -1505,7 +1505,8 @@ func (s *Server) mountedFishTreeTx(ctx context.Context, tx *sql.Tx, uid int64, s
 		if sl.Species != "" && entry.Species != "" && sl.Species != entry.Species {
 			return nil, fmt.Sprintf("鱼种不符 slot=%s keepnet=%s", sl.Species, entry.Species), nil
 		}
-		fish := buildKeepnet25(entry, "", store.SpeciesRarityTx(ctx, tx, entry.Species))
+		s.fillKeepnetVariant(entry)
+		fish := buildKeepnet25(entry, "", store.SpeciesRarityTx(ctx, tx, entry.Species), entry.ModelVariant)
 		if idx := fieldIdxByCS("ecknbkpeeji", csGUID); idx >= 0 && idx < len(fish.Fields) {
 			fish.Fields[idx].Hex = uuid5OIDHex(boardGUID + "/mounted_fish")
 		}

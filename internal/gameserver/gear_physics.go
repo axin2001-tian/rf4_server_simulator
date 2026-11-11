@@ -638,8 +638,9 @@ func (s *Server) loadGearSpec(ctx context.Context, ids rigGearIDs) gearPhysicsSp
 }
 
 // reelLockedDragForSpec 给搏鱼与抛投裁决取渔轮此刻的锁轮承力：优先读实例（已磨损的摩擦片
-// 与当前零件耐久），读不到才退回定义制动力 x 本体耐久倍率。定义值不反映磨损，直接用它
-// 会留下"摩擦片磨了但力度上限不动"的两套数字，满红不爆只修好一半。
+// 与当前零件耐久），读不到才退回定义口径。规格表收录的轮子按 机构强度 × 本体耐久
+// （实例缺失时拿不到轴承子件耐久，用本体耐久作代理）；未收录轮子回退旧公式。
+// 定义值不反映磨损，直接用它会留下"摩擦片磨了但力度上限不动"的两套数字，满红不爆只修好一半。
 func (s *Server) reelLockedDragForSpec(ctx context.Context, ids rigGearIDs, def *store.ItemDef) float64 {
 	if strings.TrimSpace(ids.Reel) == "" {
 		return 0
@@ -650,6 +651,9 @@ func (s *Server) reelLockedDragForSpec(ctx context.Context, ids rigGearIDs, def 
 				return locked
 			}
 		}
+	}
+	if spec := reelMechStrengthKg(def); spec > 0 {
+		return spec * clampUnit(ids.ReelDurability)
 	}
 	return reelDragMaxKg(def) * reelLockMultiplier(ids.ReelDurability)
 }
@@ -713,7 +717,41 @@ func (s *Server) mountedHookDef(ctx context.Context, rodGUID string) (*store.Ite
 	if err != nil {
 		return nil, 1
 	}
-	return def, 1
+	return def, s.factoryHookDurability(ctx, rodGUID, tree)
+}
+
+// factoryHookDurability 返回没有独立 item 行的出厂钩的有效耐久。
+//
+// 出厂钩没有逐钩磨损：它随宿主拟饵一起磨损。钩对象里的 nmidlgejlcp 只在
+// 首次物化时写入（canonicalizeNestedItemPhysicalFields 仅在 cur<=0 时回填），
+// 磨损后不会更新，不能作为有效耐久。真正随磨损变化的是宿主拟饵行的耐久，
+// 同一份数据推给客户端时会投影成钩的 strength 字段。
+// 历史/异常装配拿不到宿主行时，退回树里的投影值。
+func (s *Server) factoryHookDurability(ctx context.Context, rodGUID string, tree *proto.Value) float64 {
+	if lureGUID := s.mountedLureGUID(ctx, rodGUID); lureGUID != "" {
+		if row, err := s.DB.GetItemByGUID(ctx, lureGUID); err == nil && row != nil {
+			return clampFloat(row.Durability, 0, 1)
+		}
+	}
+	return treeDurability(tree)
+}
+
+// treeDurability 从物品树对象读取耐久投影（nmidlgejlcp，0..1）。
+// 出厂钩的该字段只在首次物化时写入，不是磨损依据（见 factoryHookDurability）；
+// 字段缺失或非数值时回退 1，0 是合法值（已损坏），不能回退。
+func treeDurability(tree *proto.Value) float64 {
+	if tree == nil {
+		return 1
+	}
+	idx := fieldIdxByCS(tree.Class, csDurability)
+	if idx < 0 || idx >= len(tree.Fields) || tree.Fields[idx].Num == nil {
+		return 1
+	}
+	v := float64(proto.F32FromBits(uint32(u64Of(tree.Fields[idx].Num))))
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 1
+	}
+	return clampFloat(v, 0, 1)
 }
 
 // gearWeightCapForRig 读取当前钓组并返回实际生效的派鱼重量上限（kg）；0 表示不截断。
